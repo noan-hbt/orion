@@ -1,0 +1,354 @@
+"""Guardian policy: deterministic rules over tool calls, in the core.
+
+These rules need the conversation (the trust of the context a call would run in), so they live
+where the conversation is. What must hold even if the core itself is compromised (secrets,
+destinations, approvals checked with the owner) is enforced by the guardian process
+(`orion.guardian.service`, D28). The rules do not depend on anything the model writes: only on
+the tool's declared properties, the trust of the context it would run in, and the owner's
+answers.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
+from enum import StrEnum
+from typing import Any, Literal, Protocol
+
+from pydantic import BaseModel
+
+from orion.core.events import Trust
+from orion.tools.base import Effect, Tool
+
+TRUSTED_FLOOR = Trust.SYSTEM
+"""Content below this level (other instances, third parties, web) taints a context."""
+
+
+class Verdict(StrEnum):
+    ALLOW = "allow"
+    DENY = "deny"
+
+
+@dataclass(frozen=True)
+class ActionProposal:
+    tool: Tool
+    arguments: BaseModel
+    context_trust: Trust
+    thread_id: str
+    ask_reason: str = ""
+    """Why the owner is asked, when it is not just the tool's effect."""
+
+    def describe(self) -> str:
+        return f"{self.tool.name}({self.arguments.model_dump_json()})"
+
+
+@dataclass(frozen=True)
+class Approval:
+    """The owner's answer. `grant` names the approval the guardian process recorded, which the
+    approved action presents so the guardian can check it with the owner itself (D28)."""
+
+    granted: bool
+    grant: str | None = None
+    reached: bool = True
+    """False when nobody could be asked (no channel up, the question never left): a no that
+    is not his, which an answer to someone else must not pass for a refusal (D98)."""
+
+    def __bool__(self) -> bool:
+        return self.granted
+
+
+@dataclass(frozen=True)
+class Decision:
+    verdict: Verdict
+    reason: str
+    grant: str | None = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.verdict is Verdict.ALLOW
+
+
+class Approver(Protocol):
+    async def approve(self, proposal: ActionProposal) -> Approval: ...
+
+
+class DenyAllApprover:
+    """Used when no human is reachable: anything needing approval is refused."""
+
+    async def approve(self, proposal: ActionProposal) -> Approval:
+        return Approval(False)
+
+
+SOURCES_FOR_OWNER = {
+    Trust.UNKNOWN: "du contenu d'origine inconnue",
+    Trust.WEB: "une page web ou un résultat de recherche",
+    Trust.THIRD_PARTY: "un mail, un appel ou le message de quelqu'un d'autre",
+    Trust.TRUSTED_PEER: "un message d'un autre Orion",
+    Trust.OWNER_INSTANCE: "un fichier ou un document lu pour toi",
+}
+"""What lowered a context to this trust, in the question the owner reads."""
+
+ALONE = "the owner lets Orion do this alone"
+"""The reason given when an autonomy the owner granted covers the call."""
+FREE_THREAD = "the owner leaves the night and the watch free (libre)"
+"""The reason given when the night or the watch acts on the world in `libre` (D247)."""
+APPROVED_DESPITE = "approved by owner despite untrusted context"
+"""The reason given when he said yes to this very call in a context holding outside content:
+what it writes is his word, not the context's (D231)."""
+ASKED_FROM_UNTRUSTED = frozenset({"forget_fact"})
+"""Internal, yet put to him from a context holding outside content even in `equilibre`: alone,
+it would run at that content's trust and could never remove what he told Orion (D231)."""
+
+NEVER_FROM_UNTRUSTED = frozenset({"module_install", "module_remove"})
+"""Never done from a context holding outside content, even with his yes: adding code to Orion
+(D105) is decided in a clean conversation. Letting Orion act alone is put to him there, with
+the exact grant and why he is asked (D111)."""
+NEVER_ALONE = frozenset({"module_install", "module_remove", "autonomy_grant"})
+"""Always put to him, whatever autonomy the config lists: code that runs with his memory, and
+letting Orion do more alone."""
+ANY_ACTION = "*"
+"""In `[guardian] autonomable`: the owner may let Orion do any action alone (D167), but those
+of `NEVER_ALONE`, when he asks for it; the ritual still offers only the actions listed."""
+
+
+def may_be_alone(action: str, autonomable: list[str]) -> bool:
+    """Whether the owner may let Orion do `action` without asking."""
+    if action in NEVER_ALONE:
+        return False
+    return action in autonomable or ANY_ACTION in autonomable
+
+
+WORKER_THREAD = "task:"
+WORKER_TOOLS = frozenset(
+    {"web_search", "web_read", "task", "file:download", "file:pdf"}
+    | {
+        f"browser:{a}"
+        for a in ("open", "click", "type", "select", "scroll", "back", "read", "close")
+    }
+)
+"""What a background task may use beyond reads (D110): it looks things up and reports to Orion,
+who acts and talks to the owner. Any read-only call (`Effect.NONE`: his mail, past
+conversations, agenda) is open to it too (D195). Never an approval to the owner, a message to
+him, or an act on the world from a task: it asks Orion instead."""
+NEVER_FREE = frozenset({"browser:pay"})
+"""Never done freely from Orion's own threads in `libre` (D247): paying needs his yes, or that
+he let Orion pay on this site (ORION-13, D265)."""
+NIGHT_THREAD = "night"
+"""Orion's own night (D117): while the owner sleeps, Orion looks things up, thinks, starts
+tasks and notes what he will say in the morning. Nothing put to the owner: what he let Orion
+do alone is done (D201), what needs his yes is proposed when he wakes up."""
+NIGHT_NEVER = frozenset(
+    {"file:send", "initiative_settings", "hand_notify", "hand_open", "notifications:set"}
+)
+"""Internal, yet not for the night: a file or a notification on his machine reaches him at
+once, and his settings are his."""
+NIGHT_REFUSAL = (
+    "{tool} is not for the night: the owner sleeps and did not let you do it alone. Nothing "
+    "reaches him and nothing is put to him now; propose it to him in your morning note instead"
+)
+WATCH_THREAD = "veille"
+"""Orion's watch during the day (D150): like the night, it looks things up, thinks, prepares
+and starts tasks; what it would tell him or do in the world goes in its conclusion, which the
+initiative engine weighs."""
+WATCH_REFUSAL = (
+    "{tool} is not for your watch: nothing leaves and nothing is put to him from here; say it "
+    "in your conclusion, he gets it from there"
+)
+HIS_MARKS = frozenset({"mail_mark"})
+"""Internal, yet his to see: a mail marked read is one he will not open (06/11, the watch
+marked one unasked). From the night or the watch, only within an autonomy he granted (D263),
+`libre` included."""
+HIS_MARKS_REFUSAL = (
+    "{tool} changes what he sees in his mailbox: not from here unless he let you do it alone. "
+    "Reading a mail leaves it as it was; if it should be marked, say so in your conclusion"
+)
+REFLECTIVE_THREADS = {NIGHT_THREAD: NIGHT_REFUSAL, WATCH_THREAD: WATCH_REFUSAL}
+"""Orion's own threads, where he thinks alone: nothing reaches the owner from here, and in
+`libre` he acts on the world without asking (D247)."""
+
+
+def untrusted_reason(trust: Trust) -> str:
+    """Why the owner is asked: what is in the conversation, and what to check (D90)."""
+    source = SOURCES_FOR_OWNER.get(trust, "du contenu venu d'ailleurs")
+    return (
+        f"la conversation contient {source}, qui pourrait m'avoir influencé : vérifie que "
+        "c'est bien ce que tu veux"
+    )
+
+
+UNTRUSTED_SOURCES = {
+    Trust.UNKNOWN: "content of unknown origin",
+    Trust.WEB: "a web page or a search result",
+    Trust.THIRD_PARTY: "a mail, a call or someone else's message",
+    Trust.TRUSTED_PEER: "another Orion",
+    Trust.OWNER_INSTANCE: "a file or a document read for him",
+}
+"""What lowered a context to this trust, in words the model can repeat to the owner."""
+
+
+Approvals = Literal["libre", "equilibre", "prudent"]
+"""What the owner is asked in a context holding outside content (`agent.approvals`, D85);
+`libre`: in his own conversation, nothing more than in a clean one (D232)."""
+
+OWNER_THREAD = "owner"
+"""His conversation with Orion, where `libre` applies; a contact's or another Orion's
+conversation is never freed, nor Orion's own threads."""
+
+Autonomous = Callable[[str, dict[str, Any]], Awaitable[bool]]
+"""Whether the owner let Orion do this action alone, with these parameters, within the limits
+they set (`orion.guardian.autonomy`)."""
+
+
+class Guardian:
+    def __init__(
+        self,
+        approver: Approver | None = None,
+        autonomous: Autonomous | None = None,
+        approvals: Approvals = "prudent",
+        fresh_after_minutes: int = 0,
+    ) -> None:
+        self._approver = approver or DenyAllApprover()
+        self._autonomous = autonomous
+        self._approvals: Approvals = approvals
+        self._fresh_after = fresh_after_minutes
+        """`agent.untrusted_idle_minutes`: when the conversation starts afresh (D26)."""
+
+    def _untrusted_refusal(self, tool: Tool, trust: Trust) -> str:
+        """Why, and until when: the model tells the owner, so it must not have to guess."""
+        source = UNTRUSTED_SOURCES.get(trust, "outside content")
+        until = (
+            f"It becomes possible again once the conversation starts afresh, after "
+            f"{self._fresh_after} minutes without any message (each message pushes that back)"
+            if self._fresh_after
+            else "It becomes possible again once that content has left the conversation window, "
+            "as the conversation goes on"
+        )
+        return (
+            f"{tool.name} cannot run in a context containing untrusted content "
+            f"(trust {trust.name}: {source} is in this conversation). Anything that acts on "
+            "the world or on your settings is never done from such a context, even when he "
+            f"asked: the outside content could have steered you. {until}; or he does it "
+            "himself. Tell him exactly this, without promising to retry sooner. It holds for "
+            "this call only: if he asks again later, call the tool again, the rules may differ."
+        )
+
+    def unrestricted(self, thread_id: str) -> bool:
+        """Whether outside content restricts nothing in this conversation: his own (D232) and
+        Orion's own night and watch (D247), when he chose `libre`. What it writes still carries
+        its true trust."""
+        return self._approvals == "libre" and (
+            thread_id == OWNER_THREAD or thread_id in REFLECTIVE_THREADS
+        )
+
+    async def _alone(self, tool: Tool, proposal: ActionProposal) -> bool:
+        """The owner let Orion do this alone, with these parameters."""
+        return (
+            self._autonomous is not None
+            and tool.name not in NEVER_ALONE
+            and await self._autonomous(tool.name, proposal.arguments.model_dump())
+        )
+
+    async def decide(self, proposal: ActionProposal) -> Decision:
+        tool = proposal.tool
+        effect = tool.effect_for(proposal.arguments)
+        if proposal.thread_id.startswith(WORKER_THREAD):
+            action = getattr(proposal.arguments, "action", "")
+            if (
+                effect is not Effect.NONE
+                and tool.name not in WORKER_TOOLS
+                and f"{tool.name}:{action}" not in WORKER_TOOLS
+            ):
+                return Decision(
+                    Verdict.DENY,
+                    f"{tool.name} is not for a background task: you look things up and report to "
+                    "Orion; ask him in your message, he acts and talks to the owner",
+                )
+        refusal = REFLECTIVE_THREADS.get(proposal.thread_id)
+        if refusal is not None:
+            if (
+                tool.name in NIGHT_NEVER
+                or f"{tool.name}:{getattr(proposal.arguments, 'action', '')}" in NIGHT_NEVER
+            ):
+                return Decision(Verdict.DENY, refusal.format(tool=tool.name))
+            if tool.name in HIS_MARKS:
+                if await self._alone(tool, proposal):
+                    return Decision(Verdict.ALLOW, ALONE)
+                return Decision(Verdict.DENY, HIS_MARKS_REFUSAL.format(tool=tool.name))
+            if effect is Effect.EXTERNAL:
+                # `libre`: the night and the watch act on the world without asking (D247); code
+                # in Orion and what Orion may do alone are still decided with him.
+                if (
+                    self.unrestricted(proposal.thread_id)
+                    and tool.name not in NEVER_ALONE
+                    and f"{tool.name}:{getattr(proposal.arguments, 'action', '')}" not in NEVER_FREE
+                ):
+                    return Decision(Verdict.ALLOW, FREE_THREAD)
+                # What he let Orion do alone is done at night too (D201): the night prepares
+                # rather than only proposes. The rest waits for the morning, never asked now.
+                if proposal.thread_id == NIGHT_THREAD and await self._alone(tool, proposal):
+                    return Decision(Verdict.ALLOW, ALONE)
+                return Decision(Verdict.DENY, refusal.format(tool=tool.name))
+        if (
+            proposal.context_trust < TRUSTED_FLOOR
+            and not self.unrestricted(proposal.thread_id)
+            and not tool.accepts_untrusted_for(proposal.arguments)
+        ):
+            # Content from elsewhere may have steered the model. An internal write (memory,
+            # reminders, playbook) is put to the owner (D26), unless he chose not to be asked
+            # for those (D85): what it writes keeps the context's trust anyway. Acting on the
+            # world is put to him with the exact action and why he is asked (D90), never done
+            # alone; `prudent` refuses it outright, as D26 did.
+            reason = untrusted_reason(proposal.context_trust)
+            if proposal.ask_reason:  # what happened in a conversation he did not see, first
+                reason = f"{proposal.ask_reason}, et {reason}"
+            if effect is Effect.EXTERNAL:
+                if await self._alone(tool, proposal) and tool.name not in NEVER_FROM_UNTRUSTED:
+                    # He told Orion to stop asking, knowing a mail or a page could steer it
+                    # (D168): an autonomy holds whatever the conversation contains.
+                    return Decision(Verdict.ALLOW, ALONE)
+                if self._approvals == "prudent" or tool.name in NEVER_FROM_UNTRUSTED:
+                    return Decision(
+                        Verdict.DENY, self._untrusted_refusal(tool, proposal.context_trust)
+                    )
+                approval = await self._approver.approve(replace(proposal, ask_reason=reason))
+                if approval:
+                    return Decision(Verdict.ALLOW, APPROVED_DESPITE, approval.grant)
+                return Decision(
+                    Verdict.DENY,
+                    f"{tool.name} in a context containing untrusted content "
+                    f"(trust {proposal.context_trust.name}) was put to the owner, who did not "
+                    "say yes",
+                )
+            if self._approvals == "equilibre" and tool.name not in ASKED_FROM_UNTRUSTED:
+                return Decision(
+                    Verdict.ALLOW,
+                    f"{effect.value} effect in an untrusted context ({self._approvals} mode)",
+                )
+            if proposal.thread_id in REFLECTIVE_THREADS:
+                return Decision(
+                    Verdict.DENY,
+                    f"{tool.name} after reading outside content would be put to the owner, who "
+                    "is not here: say it in your conclusion instead",
+                )
+            approval = await self._approver.approve(replace(proposal, ask_reason=reason))
+            if approval:
+                return Decision(Verdict.ALLOW, APPROVED_DESPITE, approval.grant)
+            return Decision(
+                Verdict.DENY,
+                f"{tool.name} in a context containing untrusted content "
+                f"(trust {proposal.context_trust.name}) needs the owner's approval, not given",
+            )
+        if effect is Effect.NONE:
+            return Decision(Verdict.ALLOW, "side-effect free")
+        if effect is Effect.INTERNAL:
+            return Decision(Verdict.ALLOW, "internal effect only")
+        if await self._alone(tool, proposal):
+            return Decision(Verdict.ALLOW, ALONE)
+        if proposal.context_trust < TRUSTED_FLOOR:
+            # A tool built to act on outside content (answering a mail): the owner sees the
+            # exact action, and why this one is asked with care.
+            proposal = replace(proposal, ask_reason=untrusted_reason(proposal.context_trust))
+        approval = await self._approver.approve(proposal)
+        if approval:
+            return Decision(Verdict.ALLOW, "approved by owner", approval.grant)
+        return Decision(Verdict.DENY, "owner approval required and not given")

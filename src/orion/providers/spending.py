@@ -1,0 +1,368 @@
+"""What Orion spends on models, and a ceiling on it (D79).
+
+Every model call goes through this wrapper. What a call cost is journaled (`spend.recorded`,
+with the model, who asked and whether the owner was waiting for the answer), so the tally is a
+projection like any other: rebuilt from the journal, the same on every restart.
+
+Two kinds of calls:
+
+- **in the foreground**: a turn answering the owner (a message, a call). The owner is waiting,
+  so these are never cut; each turn has its own cap (`agent.max_cost_usd_per_turn`).
+- **in the background**: everything Orion does on its own (the night's thinking, curiosity,
+  missions, the chronicle, the web search working for them, initiative messages). These stop when
+  the day's or the month's ceiling is reached, until the next day or month: the call fails
+  closed (`ProviderError`), and each background job already treats that as « not now ».
+
+The owner hears about it once per period: at `warn_at` of the month's ceiling, and when the
+background stops (through the initiative engine: quiet hours apply).
+
+Every call is journaled, a plan's too (it costs nothing per token), with its tokens: the usage
+screen counts them. What a plan's windows have used, as the provider said with the answer, is
+journaled when it changes (`plan.quota`). A plan that says nothing of its windows (ChatGPT)
+still says when it is used up: that is journaled once, until it answers again
+(`plan.exhausted`). A plan still used up after `DOWN_FOR` is told to the owner once: every call
+it took is now answered by a fallback, a lesser model (D249).
+
+    spend.recorded
+    plan.quota
+    plan.exhausted
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import structlog
+from pydantic import BaseModel, ConfigDict
+
+from orion.config import BudgetConfig
+from orion.core.events import Event, NewEvent, Provenance, Trust
+from orion.core.journal import EventStore
+from orion.core.projections import ProjectionRunner
+from orion.initiative.engine import Alert
+from orion.providers.base import (
+    Embedder,
+    ModelProvider,
+    ModelRequest,
+    ModelResponse,
+    ProviderError,
+    Speaker,
+)
+from orion.providers.foreground import waiting
+from orion.tools.base import Effect, Reversibility, Tool, ToolContext, ToolResult
+
+log = structlog.get_logger(__name__)
+
+SPENT = "spend.recorded"
+QUOTA = "plan.quota"
+EXHAUSTED = "plan.exhausted"
+DOWN_FOR = timedelta(minutes=30)
+"""How long a plan stays used up before the owner hears of it: a short spell is not news."""
+
+
+@dataclass
+class Tally:
+    name: str = "spending"
+    days: dict[str, list[float]] = field(default_factory=dict[str, list[float]])
+    """local day → [foreground, background] in dollars"""
+    months: dict[str, float] = field(default_factory=dict[str, float])
+    """local month (YYYY-MM) → total"""
+    zone: str = "Europe/Paris"
+    down: dict[str, str] = field(default_factory=dict[str, str])
+    """plan → when it was found used up, until it answers again"""
+    _seq: int = 0
+
+    async def checkpoint(self) -> int:
+        return self._seq
+
+    async def reset(self) -> None:
+        self.days.clear()
+        self.months.clear()
+        self.down.clear()
+        self._seq = 0
+
+    async def apply(self, event: Event) -> None:
+        self._seq = event.seq
+        if event.redacted:
+            return
+        payload: dict[str, Any] = event.payload
+        if event.kind == EXHAUSTED:
+            self.down.setdefault(str(payload["provider"]), str(payload["at"]))
+        if event.kind != SPENT:
+            return
+        self.down.pop(str(payload.get("provider") or ""), None)
+        at = datetime.fromisoformat(str(payload["at"])).astimezone(ZoneInfo(self.zone))
+        cost = float(payload["cost_usd"])
+        day = self.days.setdefault(at.date().isoformat(), [0.0, 0.0])
+        day[0 if payload.get("foreground") else 1] += cost
+        month = at.strftime("%Y-%m")
+        self.months[month] = self.months.get(month, 0.0) + cost
+
+    def background(self, day: date) -> float:
+        return self.days.get(day.isoformat(), [0.0, 0.0])[1]
+
+    def month(self, day: date) -> float:
+        return self.months.get(day.strftime("%Y-%m"), 0.0)
+
+
+class Spending:
+    """Wraps the model provider: journals what each call cost, and stops background calls
+    over the ceiling."""
+
+    name = "spending"
+
+    def __init__(
+        self,
+        inner: ModelProvider,
+        journal: EventStore,
+        budget: BudgetConfig,
+        timezone: str,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.inner = inner
+        self._journal = journal
+        self.budget = budget
+        self.zone = ZoneInfo(timezone)
+        self.clock = clock or (lambda: datetime.now(self.zone))
+        self.tally = Tally(zone=timezone)
+        self._runner = ProjectionRunner(journal, [self.tally])
+        self._quota_seen: dict[str, list[tuple[str, float, str | None]]] = {}
+        """Each provider's windows as last journaled: a quota is journaled when it changes."""
+        self._used_up: set[str] = set()
+        """The plans journaled as used up and not heard from since."""
+
+    async def sync(self) -> None:
+        await self._runner.catch_up()
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        owner_waiting = waiting()
+        if not owner_waiting:
+            await self.sync()
+            over = self.over(self.clock().date())
+            if over is not None:
+                raise ProviderError(
+                    f"spending ceiling reached ({over}): background paused", retryable=False
+                )
+        provenance = Provenance(source="orion:spending", actor="orion:spending")
+        try:
+            response = await self.inner.complete(request)
+        except ProviderError as exc:
+            if found := self._exhausted(exc.used_up, request.model, provenance):
+                await self._journal.append(found)
+            raise
+        at = self.clock().isoformat()
+        usage = response.usage
+        provider = response.provider or ""
+        self._used_up.discard(provider)
+        events = [
+            *self._exhausted(response.used_up, request.model, provenance),
+            NewEvent(
+                kind=SPENT,
+                payload={
+                    "at": at,
+                    "model": response.model or request.model,
+                    "provider": response.provider or "",
+                    "session": request.session_id or "",
+                    "foreground": owner_waiting,
+                    "cost_usd": round(usage.cost_usd, 6),
+                    "equivalent_usd": round(usage.equivalent_usd, 6),
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "cached_tokens": usage.cached_tokens,
+                    "cache_write_tokens": usage.cache_write_tokens,
+                },
+                provenance=provenance,
+                trust=Trust.SYSTEM,
+            ),
+        ]
+        windows = [w.model_dump() for w in response.quota]
+        if windows and self._quota_seen.get(provider) != _rounded(windows):
+            self._quota_seen[provider] = _rounded(windows)
+            events.append(
+                NewEvent(
+                    kind=QUOTA,
+                    payload={"at": at, "provider": provider, "windows": windows},
+                    provenance=provenance,
+                    trust=Trust.SYSTEM,
+                )
+            )
+        await self._journal.append(events)
+        return response
+
+    def _exhausted(self, plans: list[str], model: str, provenance: Provenance) -> list[NewEvent]:
+        """`plan.exhausted` for the plans newly found used up."""
+        fresh = [p for p in plans if p not in self._used_up]
+        self._used_up.update(fresh)
+        at = self.clock().isoformat()
+        return [
+            NewEvent(
+                kind=EXHAUSTED,
+                payload={"at": at, "provider": plan, "model": model},
+                provenance=provenance,
+                trust=Trust.SYSTEM,
+            )
+            for plan in fresh
+        ]
+
+    def over(self, day: date) -> str | None:
+        """Which ceiling the background has reached today, if any."""
+        if (
+            self.budget.daily_usd is not None
+            and self.tally.background(day) >= self.budget.daily_usd
+        ):
+            return f"{self.budget.daily_usd:.2f} $ today"
+        if self.budget.monthly_usd is not None and self.tally.month(day) >= self.budget.monthly_usd:
+            return f"{self.budget.monthly_usd:.2f} $ this month"
+        return None
+
+    def summary(self, day: date) -> str:
+        fg, bg = self.tally.days.get(day.isoformat(), [0.0, 0.0])
+        month = self.tally.month(day)
+        lines = [
+            f"Aujourd'hui : {fg + bg:.2f} $ ({fg:.2f} $ en te répondant, {bg:.2f} $ de moi-même)",
+            f"Ce mois-ci : {month:.2f} $"
+            + (f" sur {self.budget.monthly_usd:.2f} $" if self.budget.monthly_usd else ""),
+        ]
+        if self.budget.daily_usd is not None:
+            lines.append(f"Plafond de ce que je fais seul : {self.budget.daily_usd:.2f} $ par jour")
+        over = self.over(day)
+        if over is not None:
+            lines.append(f"Plafond atteint ({over}) : ce que je fais seul est en pause.")
+        return "\n".join(lines)
+
+    async def alerts(self, now: datetime) -> list[Alert]:
+        """Told once per period: nearing the month's ceiling, and when the background stops.
+        (The engine's ledger keeps each key from being said twice; quiet hours apply.)"""
+        await self.sync()
+        today = now.astimezone(self.zone).date()
+        month = today.strftime("%Y-%m")
+        found: list[Alert] = []
+        spent = self.tally.month(today)
+        ceiling = self.budget.monthly_usd
+        if ceiling is not None and spent >= ceiling:
+            found.append(
+                Alert(
+                    key=f"spending:month:{month}",
+                    notice=f"Tu as dépensé {spent:.2f} $ en modèles ce mois-ci, le plafond "
+                    f"({ceiling:.2f} $) est atteint. Ce que tu fais de toi-même (la nuit, la "
+                    "curiosité, les missions) est en pause jusqu'au 1er ; tu continues de lui "
+                    "répondre. Dis-le-lui en deux phrases, et que le plafond se change dans "
+                    "`[budget]` sur le serveur.",
+                    why="le plafond de dépense du mois est atteint",
+                    importance=0.7,
+                    fallback=f"Plafond du mois atteint ({ceiling:.2f} $) : je mets en pause ce "
+                    "que je fais seul jusqu'au 1er. Je continue de te répondre.",
+                )
+            )
+        elif ceiling is not None and spent >= ceiling * self.budget.warn_at:
+            found.append(
+                Alert(
+                    key=f"spending:warn:{month}",
+                    notice=f"Tu as dépensé {spent:.2f} $ en modèles ce mois-ci, sur un plafond "
+                    f"de {ceiling:.2f} $. Préviens-le en une phrase, sans dramatiser.",
+                    why="la dépense du mois approche du plafond",
+                    importance=0.4,
+                    fallback=f"Ce mois-ci, j'ai dépensé {spent:.2f} $ sur {ceiling:.2f} $.",
+                )
+            )
+        daily = self.budget.daily_usd
+        if daily is not None and self.tally.background(today) >= daily:
+            found.append(
+                Alert(
+                    key=f"spending:day:{today.isoformat()}",
+                    notice=f"Ce que tu as fait de toi-même aujourd'hui a coûté "
+                    f"{self.tally.background(today):.2f} $, le plafond du jour ({daily:.2f} $) "
+                    "est atteint : la suite attend demain. Dis-le-lui en une phrase.",
+                    why="le plafond de dépense du jour est atteint",
+                    fallback=f"Plafond du jour atteint ({daily:.2f} $) : ce que je fais seul "
+                    "reprend demain.",
+                )
+            )
+        for plan, at in self.tally.down.items():
+            since = datetime.fromisoformat(at).astimezone(self.zone)
+            if now - since < DOWN_FOR:
+                continue
+            found.append(
+                Alert(
+                    key=f"plan:down:{plan}:{at}",
+                    notice=f"Ton forfait {plan} est épuisé depuis {since:%H:%M} : tes appels "
+                    "passent par le modèle de secours, moins bon, jusqu'à ce qu'il revienne. "
+                    "Dis-le-lui en une phrase, pour qu'il sache pourquoi tu peux sembler moins "
+                    "fin, et qu'il peut changer de modèle dans `[models]` sur le serveur.",
+                    why=f"le forfait {plan} est épuisé et le modèle de secours répond",
+                    importance=0.6,
+                    fallback=f"Mon forfait {plan} est épuisé depuis {since:%H:%M} : je tourne "
+                    "sur le modèle de secours jusqu'à ce qu'il revienne.",
+                )
+            )
+        return found
+
+
+def _rounded(windows: list[dict[str, Any]]) -> list[tuple[str, float, str | None]]:
+    """A window by the percent: a call that moves it less is not news."""
+    return [(str(w["name"]), round(float(w["used"]), 2), w.get("resets_at")) for w in windows]
+
+
+class _NoArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+def spending_tools(spending: Spending) -> list[Tool]:
+    async def show(_args: Any, _ctx: ToolContext) -> ToolResult:
+        await spending.sync()
+        return ToolResult(spending.summary(spending.clock().date()))
+
+    return [
+        Tool(
+            name="spending",
+            description="What you have spent on models today and this month, and the ceiling "
+            "on what you do on your own (« combien tu m'as coûté ? »).",
+            input_model=_NoArgs,
+            handler=show,
+            effect=Effect.NONE,
+            reversibility=Reversibility.REVERSIBLE,
+            concurrency_safe=True,
+            accepts_untrusted_context=True,
+        )
+    ]
+
+
+class _SpendingEmbedder(Spending):
+    async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
+        assert isinstance(self.inner, Embedder)
+        return await self.inner.embed(model, texts)
+
+
+class _SpendingSpeaker(Spending):
+    async def speak(self, model: str, text: str, voice: str) -> bytes:
+        assert isinstance(self.inner, Speaker)
+        return await self.inner.speak(model, text, voice)
+
+
+class _SpendingBoth(_SpendingEmbedder, _SpendingSpeaker):
+    pass
+
+
+def with_spending(
+    inner: ModelProvider,
+    journal: EventStore,
+    budget: BudgetConfig,
+    timezone: str,
+    clock: Callable[[], datetime] | None = None,
+) -> Spending:
+    """The wrapper, embedding and speaking only if the provider does (Orion checks)."""
+    embeds, speaks = isinstance(inner, Embedder), isinstance(inner, Speaker)
+    kind = (
+        _SpendingBoth
+        if embeds and speaks
+        else _SpendingEmbedder
+        if embeds
+        else _SpendingSpeaker
+        if speaks
+        else Spending
+    )
+    return kind(inner, journal, budget, timezone, clock)

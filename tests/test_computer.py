@@ -1,0 +1,181 @@
+"""Orion's computer: a real headless browser, guarded at the network layer."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from playwright.async_api import Route
+
+from orion.computer.browser import BrowserError, Session
+from orion.computer.module import ComputerModule
+from orion.config import OrionConfig
+from orion.core.journal import SqliteJournal
+from orion.modules.registry import load
+from orion.tools.base import Effect
+from orion.web.fetch import FetchError
+
+HOME = """<html><head><title>Annonces</title></head><body>
+<h1>Locations à Lyon</h1>
+<a href="/t2">T2 Lyon 7e, 650 €</a>
+<form method="post" action="/contact"><input name="msg" placeholder="Votre message">
+<button type="submit">Envoyer</button></form>
+<form method="get" action="/search"><input name="q" type="search" placeholder="Chercher">
+</form></body></html>"""
+T2 = """<html><head><title>T2 Lyon 7e</title></head><body><p>Loyer 650 € CC, 46 m².</p>
+</body></html>"""
+
+
+class Site:
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+
+    async def handle(self, route: Route) -> None:
+        request = route.request
+        self.requests.append(f"{request.method} {request.url}")
+        if request.url.endswith("/t2"):
+            body = T2
+        elif "/search" in request.url:
+            body = "<html><title>Résultats</title><body>2 résultats</body></html>"
+        else:
+            body = HOME
+        await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
+
+
+async def only_the_test_site(host: str, _port: int) -> None:
+    if host != "annonces.test":
+        raise FetchError(f"{host} is not a public address")
+
+
+def session(site: Site, read_only: bool = True) -> Session:
+    return Session(read_only, only_the_test_site, {"annonces.test": site.handle})
+
+
+async def element(browser: Session, label: str) -> int:
+    snapshot = await browser.snapshot()
+    line = next(e for e in snapshot.elements if label in e)
+    return int(line[1 : line.index("]")])
+
+
+async def test_a_read_only_browser_reads_and_searches_but_sends_nothing() -> None:
+    site = Site()
+    async with session(site) as browser:
+        await browser.goto("https://annonces.test/")
+        page = await browser.snapshot()
+        assert page.title == "Annonces" and "Locations à Lyon" in page.text
+        await browser.click(await element(browser, "T2 Lyon 7e"))
+        assert "650 € CC" in (await browser.snapshot()).text
+        await browser.back()
+        await browser.type(await element(browser, "Chercher"), "T3", enter=True)
+        assert "2 résultats" in (await browser.snapshot()).text  # a GET search works
+        await browser.goto("https://annonces.test/")
+        await browser.type(await element(browser, "Votre message"), "Bonjour", enter=False)
+        await browser.click(await element(browser, "Envoyer"))
+    assert not any(r.startswith("POST") for r in site.requests)
+    assert any(b.startswith("POST https://annonces.test/contact") for b in browser.blocked)
+
+
+async def test_private_addresses_are_out_of_reach() -> None:
+    async with session(Site()) as browser:
+        with pytest.raises(BrowserError):
+            await browser.goto("http://127.0.0.1:8787/inkbox/webhook")
+    assert browser.blocked == ["GET http://127.0.0.1:8787/inkbox/webhook"]
+
+
+async def test_an_approved_task_may_send() -> None:
+    site = Site()
+    async with session(site, read_only=False) as browser:
+        await browser.goto("https://annonces.test/")
+        await browser.click(await element(browser, "Envoyer"))
+    assert "POST https://annonces.test/contact" in site.requests
+
+
+def test_the_browser_asks_nothing_of_him() -> None:
+    """D115: Orion's own browser opens his accounts and sends forms without asking."""
+    from orion.computer.direct import BrowserDesk, browser_tools
+
+    desk = BrowserDesk(None, lambda: session(Site()))  # type: ignore[arg-type]
+    tools = {t.name: t for t in browser_tools(desk)}
+    assert tools["browser_open"].effect is Effect.NONE
+    assert tools["browser_login"].effect is Effect.INTERNAL
+    assert tools["browser_login"].accepts_untrusted_context  # even after a page
+    assert "browser_send" not in tools
+
+
+def test_the_module_has_no_web_agent(tmp_path: Path) -> None:
+    config = OrionConfig.model_validate(
+        {"data_dir": tmp_path, "modules": {"computer": {"enabled": True}}}
+    )
+    [module] = [m for m in load(config) if isinstance(m, ComputerModule)]
+    assert "no separate web agent" in module.doctor()[0]
+
+
+async def test_a_browser_that_cannot_start_leaves_nothing_running(tmp_path: Path) -> None:
+    from orion.computer.browser import Session
+
+    session = Session(executable=str(tmp_path / "no-such-chromium"))
+    with pytest.raises(Exception, match="no-such-chromium"):  # Playwright's own error
+        await session.__aenter__()
+    assert session._pw is None  # pyright: ignore[reportPrivateUsage]  # the driver was stopped
+
+
+async def test_a_browser_that_died_does_not_stop_orion_from_stopping(tmp_path: Path) -> None:
+    # 02/11 on the server: Chromium gone, keeping its cookies on shutdown crashed the core.
+    browser = Session()
+    browser.profile = tmp_path / "profile"
+    async with browser:
+        context = browser._context  # pyright: ignore[reportPrivateUsage]
+        assert context is not None
+        await context.close()  # killed from outside
+        await browser.keep_cookies()
+
+
+async def test_a_wall_put_up_by_an_anti_bot_is_named_and_a_way_round_given() -> None:
+    """D145: Orion is told who turned the browser away and what can be done about it."""
+    walls = {
+        "/refused": "<html><title>leboncoin.fr</title><body>Accès temporairement restreint"
+        "</body></html>",
+        "/puzzle": "<html><body><iframe src='https://geo.captcha-delivery.com/captcha/?x=1'>"
+        "</iframe></body></html>",
+        # Kiabi, 05/11: the same frame, but the address is banned; a hand-over did nothing.
+        "/banned": "<html><body><iframe src='https://geo.captcha-delivery.com/captcha/?t=bv'>"
+        "</iframe></body></html>",
+    }
+
+    async def wall(route: Route) -> None:
+        body = next(b for path, b in walls.items() if route.request.url.endswith(path))
+        await route.fulfill(status=403, content_type="text/html; charset=utf-8", body=body)
+
+    async with Session(True, only_the_test_site, {"annonces.test": wall}) as browser:
+        assert await browser.page.evaluate("navigator.webdriver") is False  # pyright: ignore[reportOptionalMemberAccess]
+        await browser.goto("https://annonces.test/refused")
+        refused = await browser.snapshot()
+        assert refused.blocked == {"by": "DataDome", "puzzle": False}
+        assert "réessayer n'y changera rien" in refused.render() and "--exit" in refused.render()
+        await browser.goto("https://annonces.test/puzzle")
+        assert "hand_over" in (await browser.snapshot()).render()
+        await browser.goto("https://annonces.test/banned")
+        assert "hand_over" not in (await browser.snapshot()).render()
+
+
+async def test_orion_reads_the_wall_in_his_browser(journal: SqliteJournal) -> None:
+    """What the desk shows Orion says it too (D145)."""
+    from orion.computer.direct import BrowserDesk, browser_tools
+    from orion.tools.base import ToolContext
+
+    async def wall(route: Route) -> None:
+        await route.fulfill(
+            status=403,
+            content_type="text/html; charset=utf-8",
+            body="Accès temporairement restreint",
+        )
+
+    desk = BrowserDesk(journal, lambda: Session(False, only_the_test_site, {"annonces.test": wall}))
+    tools = {t.name: t for t in browser_tools(desk)}
+    try:
+        page = await tools["browser_open"].handler(
+            tools["browser_open"].parse('{"url": "https://annonces.test/"}'), ToolContext("o", "t")
+        )
+        assert page.content.startswith("[Ce site refuse ce navigateur (DataDome)")
+    finally:
+        await desk.aclose()

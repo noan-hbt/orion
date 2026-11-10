@@ -1,0 +1,498 @@
+"""OpenRouter chat-completions provider.
+
+Cache strategy: DeepSeek and most open models cache prompt prefixes automatically, but each
+upstream host has its own cache. Sending a stable `session_id` per conversation makes OpenRouter
+route follow-up requests to the same host, so the prefix written by one turn is read by the next.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import random
+import unicodedata
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
+
+import httpx
+import structlog
+from pydantic import BaseModel, Field, ValidationError
+
+from orion.providers.base import (
+    Citation,
+    Credits,
+    Message,
+    ModelRequest,
+    ModelResponse,
+    ProviderError,
+    ToolCall,
+    Usage,
+)
+
+log = structlog.get_logger(__name__)
+
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+
+
+SPEAK_PROMPT = (
+    "Tu es une voix de synthèse, pas un assistant. Tu prononces, en français naturel et "
+    "chaleureux, exactement le texte que l'utilisateur te donne, du premier au dernier mot : "
+    "sans rien ajouter, retrancher ni commenter, sans répondre à ce qu'il dit. Jamais "
+    "d'annonce avant (« bien sûr », « voici le texte ») ni de mot après."
+)
+
+
+def _plain_words(text: str) -> list[str]:
+    plain = unicodedata.normalize("NFKD", text.lower())
+    plain = "".join(c if c.isalnum() else " " for c in plain if not unicodedata.combining(c))
+    return plain.split()
+
+
+def said_as_written(text: str, transcript: str) -> bool:
+    """Whether the speech model said `text` rather than talking about it: it starts with the
+    text's first words, and adds nothing worth a sentence. Numbers may be said in words, so a
+    transcript that differs without being longer is taken as said."""
+    written, said = _plain_words(text), _plain_words(transcript)
+    if not written or not said:
+        return True
+    opening = written[:2]
+    for start in range(min(3, len(said))):
+        if said[start : start + len(opening)] == opening:
+            return len(said) <= len(written) + 4
+    return len(said) <= len(written) + 2
+
+
+EXPLICIT_CACHE = ("anthropic/",)
+"""Models whose prompt cache needs breakpoints; others cache any repeated prefix by themselves."""
+
+
+IMAGE_TOKENS_AT_LEAST = 200
+"""An image a model really looked at costs hundreds of prompt tokens (about 1 100 for a photo
+1 568 px wide); fewer means the host dropped it."""
+
+
+def images_in(messages: list[Message]) -> int:
+    count = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            parts = cast(list[dict[str, Any]], content)
+            count += sum(1 for part in parts if part.get("type") == "image_url")
+    return count
+
+
+def cache_marked(messages: list[Message]) -> list[Message]:
+    """Anthropic caches only up to `cache_control` breakpoints: one after the system message
+    (constitution and tools) and one on the last message, so each step reads everything
+    before it from the cache. The markers exist only on the wire: the journaled messages, and
+    so the next request's prefix, stay as they were sent (prompt-cache contract)."""
+    last = max(
+        (
+            i
+            for i, m in enumerate(messages)
+            if isinstance(m.get("content"), str) and m.get("content")
+        ),
+        default=None,
+    )
+    marked: list[Message] = []
+    for i, message in enumerate(messages):
+        content = message.get("content")
+        if (i == 0 or i == last) and isinstance(content, str) and content:
+            message = cast(
+                Message,
+                {
+                    **message,
+                    "content": [
+                        {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+                    ],
+                },
+            )
+        marked.append(message)
+    return marked
+
+
+class OpenRouterProvider:
+    name = "openrouter"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://openrouter.ai/api/v1",
+        *,
+        timeout: float = 120.0,
+        max_attempts: int = 4,
+        max_backoff: float = 20.0,
+        app_name: str = "Orion",
+        transport: httpx.AsyncBaseTransport | None = None,
+        sort: str | None = None,
+        image_hosts: dict[str, list[str]] | None = None,
+    ) -> None:
+        self._sort = sort
+        self._image_hosts = image_hosts or {}
+        """Hosts that really look at images, per model: some hosts of a model said to see drop
+        the image without a word, and the model makes up what it would have shown (D87)."""
+        """OpenRouter's provider routing (`throughput`, `latency`, `price`): with no preference
+        a slow host can serve a model at a fifth of the speed of the fastest one."""
+        self._client = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=timeout,
+            transport=transport,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "X-Title": app_name,
+            },
+        )
+        self._max_attempts = max_attempts
+        self._max_backoff = max_backoff
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def credits(self) -> Credits | None:
+        """What is left on the account: the credits bought and used (`/credits`), or, for a
+        key that may not read them, the key's own limit (`/key`)."""
+        try:
+            data = cast(dict[str, Any], (await self._get("/credits")).get("data") or {})
+            try:
+                total, used = float(data["total_credits"]), float(data["total_usage"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProviderError(f"unreadable credits: {data}", retryable=False) from exc
+            return Credits(provider=self.name, total=total, used=used, remaining=total - used)
+        except ProviderError as exc:
+            if exc.status not in (401, 403):
+                raise
+        key = cast(dict[str, Any], (await self._get("/key")).get("data") or {})
+        limit, remaining = key.get("limit"), key.get("limit_remaining")
+        try:
+            return Credits(
+                provider=self.name,
+                total=float(limit) if limit is not None else None,
+                used=float(key.get("usage") or 0),
+                remaining=float(remaining) if remaining is not None else None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProviderError(f"unreadable key: {key}", retryable=False) from exc
+
+    async def _get(self, path: str) -> dict[str, Any]:
+        try:
+            response = await self._client.get(path, timeout=10.0)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise ProviderError(f"transport error: {exc!r}", retryable=True) from exc
+        if response.status_code >= 400:
+            raise ProviderError(
+                f"HTTP {response.status_code}: {response.text[:300]}",
+                retryable=False,
+                status=response.status_code,
+            )
+        try:
+            return cast(dict[str, Any], response.json())
+        except ValueError as exc:
+            raise ProviderError("invalid JSON from provider", retryable=False) from exc
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        body = self._body(request)
+        images = images_in(request.messages)
+
+        def parse(data: dict[str, Any], attempt: int) -> ModelResponse:
+            response = self._parse(data, attempts=attempt)
+            if response.usage.prompt_tokens < IMAGE_TOKENS_AT_LEAST * images:
+                # Fail closed: an answer about an image nobody looked at is made up.
+                raise ProviderError(
+                    f"{response.provider or 'the host'} ignored the image(s): "
+                    f"{response.usage.prompt_tokens} prompt tokens for {images}",
+                    retryable=False,
+                )
+            return response
+
+        return await self._retrying(lambda attempt: self._post(body), parse)
+
+    async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
+        def parse(data: dict[str, Any], _attempt: int) -> list[list[float]]:
+            try:
+                rows = sorted(cast(list[dict[str, Any]], data["data"]), key=lambda r: r["index"])
+                vectors = [cast(list[float], row["embedding"]) for row in rows]
+            except (KeyError, TypeError) as exc:
+                raise ProviderError(
+                    f"unexpected embeddings answer: {exc!r}", retryable=False
+                ) from exc
+            if len(vectors) != len(texts):
+                raise ProviderError("embedding count mismatch", retryable=False)
+            return vectors
+
+        return await self._retrying(
+            lambda attempt: self._post({"model": model, "input": texts}, "/embeddings"), parse
+        )
+
+    async def speak(self, model: str, text: str, voice: str) -> bytes:
+        """`text` said aloud by an audio model, word for word. OpenRouter streams the audio with
+        what was said, at no extra cost: an audio model is a chat model, and now and then it
+        introduces the text instead of saying it. That voice is refused (Orion writes instead)."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                pcm, transcript = await self._speak_once(model, text, voice)
+                break
+            except ProviderError as exc:  # a dropped stream or a busy model: tried again
+                if not exc.retryable or attempt >= self._max_attempts:
+                    raise
+                delay = self._backoff(attempt, exc)
+                log.warning("provider.retry", provider=self.name, attempt=attempt,
+                            status=exc.status, delay=round(delay, 2), error=str(exc))  # fmt: skip
+                await asyncio.sleep(delay)
+        if said_as_written(text, transcript):
+            return pcm
+        log.warning("openrouter.speech_unfaithful", said=transcript[:200])
+        raise ProviderError(
+            f"the speech model said something else: {transcript[:120]!r}", retryable=False
+        )
+
+    async def _speak_once(self, model: str, text: str, voice: str) -> tuple[bytes, str]:
+        body: dict[str, Any] = {
+            "model": model,
+            "modalities": ["text", "audio"],
+            "audio": {"voice": voice, "format": "pcm16"},
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": SPEAK_PROMPT},
+                {"role": "user", "content": text},
+            ],
+        }
+        chunks: list[bytes] = []
+        said: list[str] = []
+        try:
+            async with self._client.stream("POST", "/chat/completions", json=body) as response:
+                if response.status_code >= 400:
+                    detail = (await response.aread()).decode("utf-8", "replace")[:300]
+                    raise ProviderError(
+                        f"HTTP {response.status_code}: {detail}",
+                        retryable=response.status_code in _RETRYABLE_STATUS,
+                        status=response.status_code,
+                    )
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    event = cast(dict[str, Any], json.loads(line[6:]))
+                    if "error" in event:
+                        raise ProviderError(f"provider error: {event['error']}", retryable=False)
+                    for choice in cast(list[dict[str, Any]], event.get("choices") or []):
+                        delta = cast(dict[str, Any], choice.get("delta") or {})
+                        audio = cast(dict[str, Any], delta.get("audio") or {})
+                        if audio.get("data"):
+                            chunks.append(base64.b64decode(str(audio["data"]), validate=True))
+                        if audio.get("transcript"):
+                            said.append(str(audio["transcript"]))
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise ProviderError(f"transport error: {exc!r}", retryable=True) from exc
+        except ValueError as exc:  # not JSON, or audio that is not base64
+            raise ProviderError("invalid event from provider", retryable=True) from exc
+        if not chunks:
+            raise ProviderError("the speech model sent no audio", retryable=False)
+        return b"".join(chunks), "".join(said)
+
+    async def _retrying[T](
+        self,
+        call: Callable[[int], Awaitable[dict[str, Any]]],
+        parse: Callable[[dict[str, Any], int], T],
+    ) -> T:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return parse(await call(attempt), attempt)
+            except ProviderError as exc:
+                if not exc.retryable or attempt >= self._max_attempts:
+                    raise
+                delay = self._backoff(attempt, exc)
+                log.warning(
+                    "provider.retry",
+                    provider=self.name,
+                    attempt=attempt,
+                    status=exc.status,
+                    delay=round(delay, 2),
+                    error=str(exc),
+                )
+                await asyncio.sleep(delay)
+
+    def _body(self, request: ModelRequest) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": request.model,
+            "messages": cache_marked(request.messages)
+            if request.model.startswith(EXPLICIT_CACHE)
+            else request.messages,
+            "usage": {"include": True},
+        }
+        if request.tools:
+            body["tools"] = [t.to_openai() for t in request.tools]
+            if request.no_tools:
+                body["tool_choice"] = "none"
+        if request.session_id:
+            body["session_id"] = request.session_id
+        if request.max_tokens is not None:
+            body["max_tokens"] = request.max_tokens
+        if request.temperature is not None:
+            body["temperature"] = request.temperature
+        if request.json_output:
+            body["response_format"] = {"type": "json_object"}
+        if request.reasoning_effort is not None:
+            body["reasoning"] = {"effort": request.reasoning_effort, "exclude": True}
+        if self._sort is not None:
+            body["provider"] = {"sort": self._sort}
+        hosts = self._image_hosts.get(request.model)
+        if hosts and images_in(request.messages):
+            body["provider"] = {
+                **body.get("provider", {}),
+                "order": hosts,
+                "allow_fallbacks": False,
+            }
+        if request.image_output:
+            body["modalities"] = ["image", "text"]
+        if request.web_search is not None:
+            body["plugins"] = [{"id": "web", "max_results": request.web_search}]
+        return body
+
+    async def _post(self, body: dict[str, Any], path: str = "/chat/completions") -> dict[str, Any]:
+        try:
+            response = await self._client.post(path, json=body)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # The request may still have been processed and billed upstream; it is logged as a
+            # retry so the cost is at least visible.
+            raise ProviderError(f"transport error: {exc!r}", retryable=True) from exc
+        if response.status_code >= 400:
+            raise ProviderError(
+                f"HTTP {response.status_code}: {response.text[:500]}",
+                retryable=response.status_code in _RETRYABLE_STATUS,
+                status=response.status_code,
+            )
+        try:
+            data: dict[str, Any] = response.json()
+        except ValueError as exc:
+            raise ProviderError("invalid JSON from provider", retryable=True) from exc
+        if "error" in data:
+            error: object = data["error"]
+            code = cast(dict[str, object], error).get("code") if isinstance(error, dict) else None
+            status = code if isinstance(code, int) else None
+            raise ProviderError(
+                f"provider error: {error}",
+                retryable=status in _RETRYABLE_STATUS if status else False,
+                status=status,
+            )
+        return data
+
+    def _backoff(self, attempt: int, exc: ProviderError) -> float:
+        base = min(self._max_backoff, 0.5 * 2 ** (attempt - 1))
+        return min(self._max_backoff, base * (0.5 + random.random()))
+
+    @staticmethod
+    def _parse(data: dict[str, Any], *, attempts: int) -> ModelResponse:
+        try:
+            parsed = _ChatResponse.model_validate(data)
+        except ValidationError as exc:
+            raise ProviderError(f"unexpected response shape: {exc}", retryable=True) from exc
+        if not parsed.choices:
+            raise ProviderError(f"no choices in response: {str(data)[:300]}", retryable=True)
+        choice = parsed.choices[0]
+        text = choice.message.content or ""
+        tool_calls = [
+            ToolCall(id=c.id, name=c.function.name, arguments=c.function.arguments or "{}")
+            for c in choice.message.tool_calls or []
+        ]
+
+        message: Message = {"role": "assistant", "content": text}
+        if tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": c.arguments},
+                }
+                for c in tool_calls
+            ]
+
+        raw_usage = parsed.usage or _RawUsage()
+        details = raw_usage.prompt_tokens_details or _RawPromptDetails()
+        return ModelResponse(
+            message=message,
+            text=text,
+            tool_calls=tool_calls,
+            finish_reason=choice.finish_reason,
+            usage=Usage(
+                prompt_tokens=raw_usage.prompt_tokens,
+                completion_tokens=raw_usage.completion_tokens,
+                cached_tokens=details.cached_tokens or 0,
+                cache_write_tokens=details.cache_write_tokens or 0,
+                cost_usd=raw_usage.cost or 0.0,
+            ),
+            model=parsed.model,
+            provider=parsed.provider,
+            attempts=attempts,
+            citations=[
+                Citation(url=a.url_citation.url, title=a.url_citation.title or "")
+                for a in choice.message.annotations or []
+                if a.type == "url_citation" and a.url_citation is not None
+            ],
+            images=[i.image_url.url for i in choice.message.images or []],
+        )
+
+
+# --- response schema (only the fields Orion uses; everything else is ignored) ---
+
+
+class _RawFunction(BaseModel):
+    name: str
+    arguments: str | None = None
+
+
+class _RawToolCall(BaseModel):
+    id: str
+    function: _RawFunction
+
+
+class _RawUrlCitation(BaseModel):
+    url: str
+    title: str | None = None
+
+
+class _RawAnnotation(BaseModel):
+    type: str = ""
+    url_citation: _RawUrlCitation | None = None
+
+
+class _RawImageUrl(BaseModel):
+    url: str
+
+
+class _RawImage(BaseModel):
+    image_url: _RawImageUrl
+
+
+class _RawMessage(BaseModel):
+    content: str | None = None
+    tool_calls: list[_RawToolCall] | None = None
+    annotations: list[_RawAnnotation] | None = None
+    images: list[_RawImage] | None = None
+
+
+class _RawChoice(BaseModel):
+    message: _RawMessage
+    finish_reason: str | None = None
+
+
+class _RawPromptDetails(BaseModel):
+    cached_tokens: int | None = 0
+    cache_write_tokens: int | None = 0
+
+
+class _RawUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost: float | None = 0.0
+    prompt_tokens_details: _RawPromptDetails | None = None
+
+
+class _ChatResponse(BaseModel):
+    model: str = ""
+    provider: str | None = None
+    choices: list[_RawChoice] = Field(default_factory=list[_RawChoice])
+    usage: _RawUsage | None = None

@@ -1,0 +1,299 @@
+"""Background tasks (D110): a helper works alone and reports to Orion, never to the owner."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from pydantic import BaseModel
+
+from orion.config import AgentConfig
+from orion.context.compiler import ContextCompiler
+from orion.core.events import NewEvent, Provenance, Trust
+from orion.core.journal import SqliteJournal
+from orion.guardian.policy import ActionProposal, Guardian, Verdict
+from orion.runtime import Orion
+from orion.tasks.module import PASS, TaskWork, task_tool
+from orion.tasks.service import Tasks
+from orion.tools.base import Effect, Reversibility, Tool, ToolContext, ToolRegistry, ToolResult
+from orion.workflows.engine import State
+from tests.fakes import ScriptedProvider, call_tools, fail, reply
+
+PARIS = ZoneInfo("Europe/Paris")
+OWNER = ToolContext("owner", "c0")
+
+
+class World:
+    def __init__(self, journal: SqliteJournal, provider: ScriptedProvider) -> None:
+        self.now = datetime(2026, 10, 22, 14, 0, tzinfo=PARIS)
+        self.tasks = Tasks(journal)
+        self.tool = task_tool(self.tasks, lambda: self.now, max_running=2)
+        self.orion = Orion(
+            journal=journal,
+            provider=provider,
+            registry=ToolRegistry([self.tool]),
+            guardian=Guardian(),
+            compiler=ContextCompiler("C"),
+            agent=AgentConfig(),
+        )
+        self.work = TaskWork(self.tasks, self.orion, lambda: self.now)
+
+    async def use(self, ctx: ToolContext, **args: object) -> ToolResult:
+        return await self.tool.handler(self.tool.parse(json.dumps(args)), ctx)
+
+    async def passes(self) -> None:
+        await self.work.start_ready()
+        await self.work.settle()
+
+
+def task(action: str, **args: object) -> tuple[str, dict[str, object]]:
+    return ("task", {"action": action, **args})
+
+
+async def test_a_task_works_on_alone_and_writes_to_orion_only(journal: SqliteJournal) -> None:
+    provider = ScriptedProvider()
+    world = World(journal, provider)
+    started = await world.use(
+        OWNER, action="start", goal="Des colliers dorés", brief="Sobres, 150-300 €, photos."
+    )
+    [running] = await world.tasks.running()
+    assert running.id in started.content
+    assert world.work._woken.is_set()  # pyright: ignore[reportPrivateUsage]  # it starts now
+
+    provider.extend(reply("Deux colliers : Agatha 180 € (fi_1), Cleor 169 €."))
+    await world.passes()
+    brief = str(provider.requests[0].messages[-1]["content"])
+    assert "Sobres, 150-300 €" in brief and "tu ne lui écris jamais" in brief
+    assert provider.requests[0].session_id == f"orion:task:{running.id}"  # its own thread
+    [alert] = await world.work.alerts(world.now)
+    assert alert.spoken_to and "Agatha 180 €" in alert.notice and "`task` (say)" in alert.notice
+
+    # Unasked, it goes on with a second pass, and ends itself.
+    provider.extend(
+        call_tools(task("done", summary="4 colliers trouvés")), reply("Fini : 4 colliers.")
+    )
+    await world.passes()
+    assert "Passage n°2" in str(provider.requests[1].messages[-1]["content"])
+    assert await world.tasks.running() == []
+    alerts = await world.work.alerts(world.now)
+    assert len(alerts) == 2 and "4 colliers trouvés" in alerts[1].notice  # its summary, once
+    await world.passes()  # nothing runs once done
+    assert len(provider.requests) == 3
+
+
+async def test_a_task_waits_for_orion_and_orion_steers_it(journal: SqliteJournal) -> None:
+    provider = ScriptedProvider()
+    world = World(journal, provider)
+    await world.use(OWNER, action="start", goal="Un hôtel à Lyon", brief="Pour samedi soir.")
+    [running] = await world.tasks.running()
+    provider.extend(call_tools(task("wait")), reply("Quel budget maximum ?"))
+    await world.passes()
+    await world.passes()  # it waits: no pass until Orion answers
+    assert len(provider.requests) == 2
+
+    told = await world.use(OWNER, action="say", task=running.id, text="120 € la nuit, max")
+    assert not told.is_error
+    provider.extend(reply("Trois hôtels sous 120 €."))
+    await world.passes()
+    assert "<orion>\n120 € la nuit, max\n</orion>" in str(
+        provider.requests[-1].messages[-1]["content"]
+    )
+
+    # He no longer wants it: stopped, it does nothing more.
+    await world.use(OWNER, action="stop", task=running.id, why="il a trouvé")
+    await world.passes()
+    assert len(provider.requests) == 3
+
+
+async def test_a_task_ends_at_its_limits_and_says_so(journal: SqliteJournal) -> None:
+    provider = ScriptedProvider()
+    world = World(journal, provider)
+    await world.use(OWNER, action="start", goal="Comparer des forfaits", brief="Mobile, < 15 €.")
+    provider.extend(reply("Premier tri : Free, Sosh.", cost=1.5))  # beyond its 1 $
+    await world.passes()
+    assert await world.tasks.running() == []
+    notices = [a.notice for a in await world.work.alerts(world.now)]
+    assert any("son budget est épuisé" in n for n in notices)
+
+    await world.use(OWNER, action="start", goal="Guetter un billet", brief="Paris-Lyon.", minutes=5)
+    world.now += timedelta(minutes=6)
+    await world.passes()
+    assert await world.tasks.running() == []
+    assert len(provider.requests) == 1  # out of time before it began again
+
+
+class _Args(BaseModel):
+    action: str = ""
+
+
+def _tool(name: str, effect: Effect) -> Tool:
+    async def run(_args: Any, _ctx: ToolContext) -> ToolResult:
+        return ToolResult("ok")
+
+    return Tool(
+        name=name,
+        description="x",
+        input_model=_Args,
+        handler=run,
+        effect=effect,
+        reversibility=Reversibility.REVERSIBLE,
+        accepts_untrusted_context=True,
+    )
+
+
+async def test_a_task_only_looks_things_up(journal: SqliteJournal) -> None:
+    guardian = Guardian()
+    inside = "task:t_1"
+
+    async def verdict(name: str, effect: Effect, action: str = "", thread: str = inside) -> Verdict:
+        proposal = ActionProposal(_tool(name, effect), _Args(action=action), Trust.SYSTEM, thread)
+        return (await guardian.decide(proposal)).verdict
+
+    assert await verdict("web_search", Effect.NONE) is Verdict.ALLOW
+    assert await verdict("mail", Effect.NONE) is Verdict.ALLOW  # every read, as Orion has
+    assert await verdict("conversations_search", Effect.NONE) is Verdict.ALLOW
+    assert await verdict("mail_send", Effect.EXTERNAL) is Verdict.DENY
+    assert await verdict("file", Effect.INTERNAL, "download") is Verdict.ALLOW
+    assert await verdict("file", Effect.INTERNAL, "send") is Verdict.DENY  # nothing to him
+    assert await verdict("remind_me", Effect.INTERNAL) is Verdict.DENY
+    assert await verdict("peer_message", Effect.EXTERNAL) is Verdict.DENY
+    assert await verdict("browser", Effect.NONE, "open") is Verdict.ALLOW
+    assert await verdict("browser", Effect.EXTERNAL, "send") is Verdict.DENY  # Orion sends
+    assert await verdict("browser", Effect.EXTERNAL, "login") is Verdict.DENY
+    assert await verdict("remind_me", Effect.INTERNAL, thread="owner") is Verdict.ALLOW
+
+
+async def test_a_task_briefed_after_reading_a_page_is_worth_that_page(
+    journal: SqliteJournal,
+) -> None:
+    provider = ScriptedProvider()
+    world = World(journal, provider)
+    after_the_web = ToolContext("owner", "c1", context_trust=Trust.WEB)
+    await world.use(after_the_web, action="start", goal="Comparer", brief="Ce que dit la page.")
+    [running] = await world.tasks.running()
+    assert running.trust is Trust.WEB
+    provider.extend(reply("Rien de plus."))
+    await world.passes()
+    received = [e for e in await journal.read() if e.kind == "initiative.triggered"]
+    assert received and received[-1].trust is Trust.WEB  # its pass reads at the page's trust
+
+
+async def test_tasks_started_at_once_keep_to_the_limit(journal: SqliteJournal) -> None:
+    import asyncio
+
+    world = World(journal, ScriptedProvider())
+    started = await asyncio.gather(
+        *(
+            world.use(OWNER, action="start", goal=f"Recherche {i}", brief="Un brief complet.")
+            for i in range(4)
+        )
+    )
+    assert len(await world.tasks.running()) == 2
+    assert sum(r.is_error for r in started) == 2
+
+
+def test_a_task_over_its_limits_is_capped_not_refused() -> None:
+    """05/11: `budget_usd` 5 and a long report were refused, and the steps were lost."""
+    from orion.tasks.module import DoneInput, StartInput
+
+    start = StartInput.model_validate(
+        {"goal": "trouver un vol", "brief": "Lisbonne, en mai, pas cher.", "budget_usd": 5}
+    )
+    assert start.budget_usd == 3.0
+    report = DoneInput.model_validate({"summary": "étape. " * 2000})
+    assert report.summary.startswith("étape.") and len(report.summary) < 5000
+
+
+async def test_a_task_with_a_done_when_ends_done_only_on_a_confirmed_action(
+    journal: SqliteJournal,
+) -> None:
+    """D274: like a goal, its word is not enough; the action that shows it is."""
+    world = World(journal, ScriptedProvider())
+    when = "une place libre samedi trouvée sur le site"
+    await world.use(
+        OWNER, action="start", goal="Une place au resto", brief="Samedi soir, 4.", done_when=when
+    )
+    await world.use(
+        OWNER, action="start", goal="Une place au ciné", brief="Samedi soir, 4.", done_when=when
+    )
+    first, second = await world.tasks.running()
+
+    said = await world.use(ToolContext(first.thread, "c1"), action="done", summary="Trouvé.")
+    assert "non prouvée" in said.content
+    assert (await world.tasks.get(first.id)).finished == "unproven"  # type: ignore[union-attr]
+    [alert] = await world.work.alerts(world.now)
+    assert "Non prouvé" in alert.notice
+
+    await journal.append(
+        [
+            NewEvent(
+                kind="tool.executed",
+                payload={"outcome": "CONFIRMED", "action_id": "web:resa#1", "proof": "Table 20h"},
+                provenance=Provenance(source=second.thread, actor="orion:core"),
+                trust=Trust.SYSTEM,
+            )
+        ]
+    )
+    await world.use(
+        ToolContext(second.thread, "c2"),
+        action="done",
+        summary="Table à 20h.",
+        seen="web:resa#1",
+    )
+    assert (await world.tasks.get(second.id)).finished == "done"  # type: ignore[union-attr]
+
+
+async def test_a_task_cut_mid_pass_resumes_once_and_a_model_down_only_pauses_it(
+    journal: SqliteJournal,
+) -> None:
+    """F-05: a pass is a workflow step. A restart redoes the cut pass, never the passes done;
+    a model out of quota pauses the pass instead of ending the task."""
+    provider = ScriptedProvider(reply("Premier tri."))
+    world = World(journal, provider)
+    await world.use(OWNER, action="start", goal="Un vol pour Rome", brief="En mai, < 200 €.")
+    [task] = await world.tasks.running()
+    await world.passes()
+
+    # Pass 2 begins, then the process dies (journaled as the engine would have).
+    for kind, payload in [
+        (
+            "workflow.started",
+            {
+                "workflow": PASS,
+                "goal": task.goal,
+                "steps": ["pass"],
+                "inputs": {"task_id": task.id, "pass": 2},
+            },
+        ),
+        ("workflow.step_began", {"step": "pass", "attempt": 1}),
+    ]:
+        await journal.append(
+            [
+                NewEvent(
+                    kind=kind,
+                    payload={"run_id": "w_cut", **payload},
+                    provenance=Provenance(source="t", actor="orion:tasks"),
+                    trust=Trust.SYSTEM,
+                )
+            ]
+        )
+
+    restarted = World(journal, provider)
+    await restarted.work.engine.recover()
+    provider.extend(fail("quota", retryable=True))
+    await restarted.work.engine.resume_all()
+    await restarted.passes()
+    assert len(provider.requests) == 2  # pass 1 not redone; pass 2 tried once
+    assert await restarted.tasks.running() != []  # the model down did not end it
+    assert restarted.work.engine.projection.runs["w_cut"].state is State.WAITING
+
+    restarted.now += timedelta(minutes=20)
+    provider.extend(reply("Deux vols."))
+    await restarted.work.engine.resume_all()
+    await restarted.passes()
+    assert len(provider.requests) == 3
+    assert "Passage n°2" in str(provider.requests[-1].messages[-1]["content"])
+    [running] = await restarted.tasks.running()
+    assert running.passes == 2

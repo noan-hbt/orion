@@ -1,0 +1,1067 @@
+"""The deliberate agent loop.
+
+A generator over model calls and tool executions. It owns no state beyond one run: the caller
+supplies the compiled context and journals every message the loop emits, so a run can always
+be reconstructed from the journal.
+
+Termination is typed, budgets are enforced in code, repeated identical tool calls are detected,
+and every tool call passes through the guardian before it runs. When a limit stops the work,
+the model gets one last call without tools to tell the owner where things stand, rather than
+leaving them with a half-finished thought.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import time
+from collections import Counter
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
+from typing import Literal, cast
+
+import structlog
+from pydantic import BaseModel
+
+from orion.core.events import Trust
+from orion.guardian.policy import ALONE, APPROVED_DESPITE, ActionProposal, Guardian
+from orion.providers.base import (
+    Message,
+    ModelProvider,
+    ModelRequest,
+    ModelResponse,
+    ProviderError,
+    ToolCall,
+    Usage,
+    spoken,
+)
+from orion.tools.base import (
+    DRAWER,
+    Effect,
+    Tool,
+    ToolContext,
+    ToolInputError,
+    ToolRegistry,
+    ToolResult,
+    idempotency_key,
+)
+from orion.tools.outcome import Outcome
+
+log = structlog.get_logger(__name__)
+
+
+class StopReason(StrEnum):
+    COMPLETED = "completed"
+    MAX_STEPS = "max_steps"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    STALLED = "stalled"
+    PROVIDER_ERROR = "provider_error"
+    TRUNCATED = "truncated"
+    HALTED = "halted"
+    TOOL_ERROR = "tool_error"
+    """A tool step failed in a way no tool result covers (a bug): every call is answered with
+    the failure, so the thread stays well formed for the next turn."""
+
+
+ANSWERED = frozenset(
+    {
+        StopReason.COMPLETED,
+        StopReason.MAX_STEPS,
+        StopReason.BUDGET_EXHAUSTED,
+        StopReason.STALLED,
+        StopReason.TRUNCATED,
+    }
+)
+"""The stops where the owner got a reply, possibly a wrap-up: what he said in such a turn is
+remembered. Errors and called-off work are not: their words were never answered."""
+
+
+Halted = Callable[[], Awaitable[bool]]
+"""Whether the work was called off meanwhile."""
+
+FinishCheck = Callable[[str, Sequence[str]], str | None]
+"""(final reply, tools called this turn) → a note that sends the model back, or None."""
+GroundCheck = Callable[[str, Sequence[str], Sequence[Message]], Awaitable[str | None]]
+"""(final reply, tools called this turn, what this turn added) → a note when the reply states what
+no tool showed, or None (`orion.cognition.grounding`)."""
+
+
+@dataclass(frozen=True)
+class Budget:
+    max_steps: int = 12
+    max_tool_calls: int = 40
+    max_cost_usd: float = 0.50
+    max_identical_calls: int = 2
+    continuations: int = 0
+    """Times a turn that runs out of steps gets `max_steps` more instead of stopping, the owner
+    told it goes on. The cost cap still holds, and a stalled turn never goes on."""
+
+
+@dataclass(frozen=True)
+class LoopSettings:
+    model: str
+    session_id: str
+    thread_id: str
+    correlation_id: str
+    origin_event_id: str | None = None
+    timezone: str = "Europe/Paris"
+    max_tokens: int | None = None
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    """How long the model thinks before each step (`AgentConfig.reasoning_effort`)."""
+    budget: Budget = field(default_factory=Budget)
+    wrap_up: bool = True
+    """On a limit, one more model call (no tools) to report what was done and what is left."""
+    asking: str = ""
+    """What the owner must hear when asked from a conversation he does not see (another
+    Orion's, D102): an approval never arrives out of nowhere."""
+    halted: Halted | None = None
+    """Whether the work was called off meanwhile (a mission closed while it runs): checked
+    before each step, and the calls not run yet are dropped."""
+    must_answer: bool = True
+    """An empty reply with nothing said sends the model back once (`SAY_SOMETHING`). Not where
+    silence is an answer (an initiative, a contact, another Orion): there it would make a
+    message out of a model that chose to say nothing."""
+    finish_check: FinishCheck | None = None
+    """Asked once per run about the final reply before it goes: a note sends the model back
+    to work for one more step (`orion.cognition.finish`)."""
+    ground_check: GroundCheck | None = None
+    """Asked once per run, after `finish_check`, whether the final reply's claims rest on what
+    the tools returned: a note sends the model back to check (`orion.cognition.grounding`)."""
+
+
+WRAP_UP = (
+    "[Orion · limite du tour atteinte ({why}). N'appelle plus d'outil : réponds maintenant, "
+    "brièvement, avec ce que tu as fait, ce que tu as trouvé et ce qui reste à faire.]"
+)
+WRAP_UP_TOLD = (
+    "\n[Déjà envoyé pendant ce tour, il l'a lu : ne le redis pas, réponds seulement ce qui "
+    "manque.]\n{told}"
+)
+"""A wrap-up asked for "what you found" repeated what `tell` had just sent (2026-10-31)."""
+
+
+def told_in(messages: Sequence[Message]) -> list[str]:
+    """What left during these messages, in order: the words beside each call, and what `tell`
+    sent. Only `tell` counted, and on the Claude plan (no `tell`, D215) a wrap-up repeated the
+    words that had left beside the calls."""
+    return [
+        said
+        for m in messages
+        if m["role"] == "assistant" and m.get("tool_calls") and (said := spoken(m))
+    ]
+
+
+_WHY = {
+    "max_steps": "trop d'étapes",
+    "tool budget": "trop d'appels d'outils",
+    "cost budget": "coût maximal",
+    "repeated identical calls": "appels répétés à l'identique",
+}
+
+
+# --- events emitted by the loop ---
+
+
+@dataclass(frozen=True)
+class MessageEmitted:
+    """A message to append to the conversation, in the exact form sent to the provider."""
+
+    message: Message
+    trust: Trust
+
+
+@dataclass(frozen=True)
+class ModelCalled:
+    response: ModelResponse
+
+
+@dataclass(frozen=True)
+class ToolStarted:
+    """A call about to run, journaled before it does: a turn frozen in it, or killed, shows
+    where (ORION-25)."""
+
+    call: ToolCall
+    deadline: float
+    may_act: bool = False
+    """Cut mid-way, it may have changed something outside: a restart settles it UNCERTAIN
+    (`orion.tools.interrupted`)."""
+
+
+@dataclass(frozen=True)
+class ToolExecuted:
+    call: ToolCall
+    result: ToolResult
+    decision_reason: str
+
+
+@dataclass(frozen=True)
+class Finished:
+    reason: StopReason
+    text: str
+    usage: Usage
+    detail: str = ""
+    steps: int = 0
+    """Model calls made."""
+    tool_seconds: float = 0.0
+    """Wall time spent running tools (the rest of the turn is the model)."""
+
+
+Steer = Callable[[], Awaitable[tuple[Message, Trust] | None]]
+"""Asked between steps for a message that arrived meanwhile (e.g. the owner wrote again while
+Orion worked). The caller journals the message before returning it; the loop appends it to
+the conversation before the next model call."""
+
+Waiting = Callable[[], bool]
+"""Whether a message is waiting to join the turn. Checked before each tool call starts: calls not
+started yet are skipped, so Orion reads the owner before carrying on with a plan they may have
+just changed (a running call is never interrupted)."""
+
+SKIPPED = "Not run: the owner wrote meanwhile; read their message first, then decide."
+CALLED_OFF = "Not run: this work was called off."
+SAME_FAILURE = (
+    "\n[Orion · cet outil vient d'échouer deux fois de la même façon : réessayer ne changera "
+    "rien. Change d'approche, ou dis ce qui bloque.]"
+)
+CUT = (
+    "[Orion · ta réponse a été coupée par la limite de longueur. Continue exactement où elle "
+    "s'arrête, sans rien répéter.]"
+)
+MAX_CUTS = 2
+"""Times a reply cut by the length limit is continued before it goes as it is."""
+UNSENT = (
+    "[Orion · ta réponse ci-dessus n'est pas partie : un message est arrivé entre-temps. "
+    "Réponds en tenant compte de tout.]"
+)
+SAY_SOMETHING = (
+    "[Orion · ta réponse est vide et rien ne lui est parti pendant ce tour : réponds-lui.]"
+)
+"""An empty final reply is right when the words beside the tool calls said it all (D216); with
+nothing said at all, the owner would get nothing."""
+UNREPORTED = (
+    "[Orion · ta réponse est vide, mais tu viens de lire le résultat de {tools} et il n'en sait "
+    "rien : ce qui est parti l'a été avant ce résultat.\nDéjà parti :\n{said}\nDis-lui ce que tu "
+    "as trouvé, sans redire ce qui est parti. Si ce résultat ne change vraiment rien pour lui, "
+    "ta réponse reste vide.]"
+)
+"""The words beside a call that reads leave before its result: « je vérifie la date » + a search,
+then an empty reply, and what was found never reached him (03/11)."""
+ALREADY_SAID = (
+    "\n[Déjà parti pendant ce tour, il l'a lu :\n{said}\nSi ça suffit, ta réponse finale reste "
+    "vide : rien ne part. Sinon, elle ne dit que ce qui manque.]"
+)
+"""A nudge on the final reply asked for it « entière »: Haiku wrote again what had left with
+the calls (03/11, « ok, noté pour pagepilot », D223)."""
+GOING_ON = "C'est plus long que prévu, je continue."
+UNFINISHED = (
+    "[Orion · Ta réponse n'est pas encore partie : ton plan a encore {n} étape(s) à faire "
+    "({steps}). Fais-les maintenant, puis réponds. Une étape impossible ou devenue inutile : "
+    "remets le plan à jour sans elle, et dis pourquoi dans ta réponse.]"
+)
+MAX_UNFINISHED = 3
+"""Times a reply is held back because the plan still has steps to do. Seen for real: a model
+that stops halfway through a long task and reports, its own plan unfinished. Only after it
+worked since the last time: a model that answers again without a tool call has its reasons."""
+
+SWITCH_MODEL = "switch_model"
+"""A tool result whose data names a model moves the rest of the turn to it (`think_harder`);
+`SWITCH_COST` then sets the turn's cost cap. The conversation is unchanged, only the model that
+reads it, so each request still extends the previous one."""
+SWITCH_COST = "max_cost_usd"
+
+
+@dataclass(frozen=True)
+class Told:
+    """Words for the owner now, mid-turn (the turn goes on past its steps): the caller
+    delivers them."""
+
+    text: str
+
+
+REPEAT_REFUSED = "repeat refused"
+TIMED_OUT = "timed out"
+STOPPED_CALL = "stopped by the owner"
+STOP_POLL_SECONDS = 0.5
+"""How often a running call looks whether he asked to stop (ORION-32)."""
+STOP_GRACE_SECONDS = 10.0
+"""How long a cut call gets to let go of what it holds before the turn goes on without it."""
+STRAY_RUNNING = "a stopped call still runs"
+
+_STRAYS: dict[asyncio.Future[ToolResult], str] = {}
+"""Calls cut by a Stop that did not end within the grace (a handler that ignores the
+cancellation): still running, so the stop is not done (ORION-32). Call → its tool's name."""
+
+
+def stray_calls() -> list[str]:
+    """The tools of the calls a Stop could not end, still running."""
+    return sorted(set(_STRAYS.values()))
+
+
+async def strays_ended() -> None:
+    """Returns once every call a Stop could not end has ended."""
+    while _STRAYS:
+        await asyncio.wait(set(_STRAYS))
+
+
+def _family(name: str) -> str:
+    """What a tool shares with its siblings (`browser_click` and `browser_open` drive one
+    browser): a call a Stop could not end keeps its family closed until it ends."""
+    return name.split("_", 1)[0]
+
+
+LoopEvent = MessageEmitted | ModelCalled | ToolStarted | ToolExecuted | Told | Finished
+
+
+async def run_agent(
+    provider: ModelProvider,
+    registry: ToolRegistry,
+    guardian: Guardian,
+    messages: list[Message],
+    settings: LoopSettings,
+    context_trust: Trust = Trust.OWNER,
+    steer: Steer | None = None,
+    waiting: Waiting | None = None,
+) -> AsyncIterator[LoopEvent]:
+    """Run until the model answers without tool calls, or a limit is reached.
+
+    `messages` is the compiled context; it is extended in place with every emitted message,
+    and with every message `steer` hands over between steps.
+    """
+    budget = settings.budget
+    usage = Usage()
+    tool_calls_made = 0
+    call_counts: Counter[tuple[str, str]] = Counter()
+    last_text = ""
+    steps = 0
+    tool_seconds = 0.0
+    model = settings.model
+    max_cost = budget.max_cost_usd
+    checked = False
+    grounded = False  # the reply's claims were checked against the tools' results
+    pressed = False  # sent back once for an empty reply with nothing said (`SAY_SOMETHING`)
+    failures: Counter[tuple[str, str]] = Counter()
+    parts: list[str] = []  # a reply cut by the length limit, so far: continued, then joined
+    segment = 0  # model calls since the turn started or last went on (`Budget.continuations`)
+    continuations = budget.continuations
+    called: list[str] = []
+    open_steps: list[str] = []  # the plan's steps not done yet, from its last call
+    held = 0  # replies held back for an unfinished plan
+    worked = False  # tools ran since the last time
+    read: list[str] = []  # tools of the last step whose result the model was to read
+    turn_start = len(messages)  # what this turn adds comes after
+
+    def finished(reason: StopReason, text: str, detail: str = "") -> Finished:
+        return Finished(reason, text, usage, detail, steps, round(tool_seconds, 3))
+
+    async def wrap_up(reason: StopReason, detail: str) -> AsyncIterator[LoopEvent]:
+        nonlocal usage, steps
+        if not settings.wrap_up:
+            yield finished(reason, last_text, detail)
+            return
+        why = _WHY.get(detail or reason.value, detail or reason.value)
+        sent = told_in(messages[turn_start:])
+        content = WRAP_UP.format(why=why) + (
+            WRAP_UP_TOLD.format(told="\n".join(f"- {t}" for t in sent)) if sent else ""
+        )
+        note: Message = {"role": "user", "content": content}
+        messages.append(note)
+        yield MessageEmitted(note, Trust.SYSTEM)
+        request = ModelRequest(
+            model=model,
+            messages=messages,
+            tools=registry.specs(),
+            session_id=settings.session_id,
+            max_tokens=settings.max_tokens,
+            reasoning_effort=settings.reasoning_effort,
+            no_tools=True,
+        )
+        try:
+            response = await provider.complete(request)
+        except ProviderError:
+            log.exception("loop.wrap_up_failed", thread=settings.thread_id)
+            yield finished(reason, last_text, detail)
+            return
+        usage = usage + response.usage
+        steps += 1
+        yield ModelCalled(response)
+        # A model that calls a tool anyway: keep its words, drop the calls (they never run).
+        message: Message = {"role": "assistant", "content": response.text or ""}
+        messages.append(message)
+        yield MessageEmitted(message, min(context_trust, Trust.SYSTEM))
+        yield finished(reason, response.text or last_text, detail)
+
+    while True:
+        if segment == budget.max_steps:
+            if continuations <= 0 or usage.cost_usd >= max_cost:
+                async for event in wrap_up(StopReason.MAX_STEPS, ""):
+                    yield event
+                return
+            continuations -= 1
+            segment = 0
+            log.info("loop.going_on", thread=settings.thread_id, steps=steps)
+            yield Told(GOING_ON)
+        segment += 1
+        room = segment < budget.max_steps or continuations > 0  # another call fits after this
+        request = ModelRequest(
+            model=model,
+            messages=messages,
+            tools=registry.specs(),
+            session_id=settings.session_id,
+            max_tokens=settings.max_tokens,
+            reasoning_effort=settings.reasoning_effort,
+        )
+        try:
+            response = await provider.complete(request)
+        except ProviderError as exc:
+            log.exception("loop.provider_error", thread=settings.thread_id)
+            yield finished(StopReason.PROVIDER_ERROR, last_text, str(exc))
+            return
+
+        usage = usage + response.usage
+        steps += 1
+        yield ModelCalled(response)
+        messages.append(response.message)
+        # The model's output is only as trustworthy as what it read.
+        yield MessageEmitted(response.message, min(context_trust, Trust.SYSTEM))
+        last_text = response.text or last_text
+
+        if response.tool_calls and settings.halted is not None and await settings.halted():
+            # Called off while the model thought: nothing more runs, and nothing is said.
+            for call in response.tool_calls:
+                dropped: Message = {"role": "tool", "tool_call_id": call.id, "content": CALLED_OFF}
+                messages.append(dropped)
+                yield MessageEmitted(dropped, Trust.SYSTEM)
+            yield finished(StopReason.HALTED, "")
+            return
+
+        if not response.tool_calls:
+            if (response.text or "").strip():
+                read = []  # it has spoken since what it read
+            reason = (
+                StopReason.TRUNCATED if response.finish_reason == "length" else StopReason.COMPLETED
+            )
+            if (
+                reason is StopReason.TRUNCATED
+                and len(parts) < MAX_CUTS
+                and room
+                and usage.cost_usd < max_cost
+            ):
+                # Cut mid-sentence: the model goes on from there, and the owner gets it whole.
+                log.info("loop.reply_cut", thread=settings.thread_id, cuts=len(parts) + 1)
+                parts.append(response.text or "")
+                more: Message = {"role": "user", "content": CUT}
+                messages.append(more)
+                yield MessageEmitted(more, Trust.SYSTEM)
+                continue
+            text = "".join([*parts, response.text or ""])
+            # The owner wrote while this reply was written: it has not left yet, so the next
+            # one answers both instead of a reply to a question he may have just changed.
+            later = (
+                await steer()
+                if steer is not None
+                and reason is StopReason.COMPLETED
+                and room
+                and usage.cost_usd < max_cost
+                else None
+            )
+            if later is not None:
+                log.info("loop.reply_held", thread=settings.thread_id)
+                written, trust = later
+                messages.append(written)
+                context_trust = min(context_trust, trust)
+                unsent: Message = {"role": "user", "content": UNSENT}
+                messages.append(unsent)
+                parts.clear()  # the cut reply never left either
+                yield MessageEmitted(unsent, Trust.SYSTEM)
+                continue
+            if (
+                open_steps
+                and worked
+                and held < MAX_UNFINISHED
+                and reason is StopReason.COMPLETED
+                and room
+                and usage.cost_usd < max_cost
+            ):
+                log.info("loop.plan_unfinished", thread=settings.thread_id, left=len(open_steps))
+                held += 1
+                worked = False
+                parts.clear()
+                more = {
+                    "role": "user",
+                    "content": UNFINISHED.format(n=len(open_steps), steps=" ; ".join(open_steps)),
+                }
+                messages.append(more)
+                yield MessageEmitted(more, Trust.SYSTEM)
+                continue
+            if (
+                not text.strip()
+                and settings.must_answer
+                and not pressed
+                and reason is StopReason.COMPLETED
+                and room
+                and usage.cost_usd < max_cost
+                and (read or not _reached_him(messages[turn_start:]))
+            ):
+                # Words beside a search left before its result: « je vérifie » is not what it
+                # found (03/11 13:09, the VAT option's start date never came).
+                log.info("loop.empty_reply", thread=settings.thread_id, unread=read)
+                pressed = True
+                said = told_in(messages[turn_start:])
+                press: Message = {
+                    "role": "user",
+                    "content": UNREPORTED.format(
+                        tools=", ".join(dict.fromkeys(read)),
+                        said="\n".join(f"- {t}" for t in said),
+                    )
+                    if read and said
+                    else SAY_SOMETHING,
+                }
+                messages.append(press)
+                yield MessageEmitted(press, Trust.SYSTEM)
+                continue
+            note = (
+                settings.finish_check(text, called)
+                if settings.finish_check is not None
+                and not checked
+                and reason is StopReason.COMPLETED
+                and room
+                else None
+            )
+            checked = True
+            if note is not None and usage.cost_usd < max_cost:
+                log.info("loop.not_done_yet", thread=settings.thread_id)
+                said = told_in(messages[turn_start:])
+                if said:
+                    note += ALREADY_SAID.format(said="\n".join(f"- {t}" for t in said))
+                nudge: Message = {"role": "user", "content": note}
+                messages.append(nudge)
+                yield MessageEmitted(nudge, Trust.SYSTEM)
+                continue
+            if (
+                settings.ground_check is not None
+                and not grounded
+                and reason is StopReason.COMPLETED
+                and room
+                and usage.cost_usd < max_cost
+            ):
+                grounded = True
+                unproven = await settings.ground_check(text, called, messages[turn_start:])
+                if unproven is not None:
+                    log.info("loop.unproven", thread=settings.thread_id)
+                    check: Message = {"role": "user", "content": unproven}
+                    messages.append(check)
+                    yield MessageEmitted(check, Trust.SYSTEM)
+                    continue
+            yield finished(reason, text)
+            return
+
+        tool_calls_made += len(response.tool_calls)
+        # A call through the drawer is the call of the drawer's own tool from here on (D151).
+        calls = [registry.resolve(call) for call in response.tool_calls]
+        called.extend(_called(call) for call in calls)
+        read = [call.name for call in calls if not _records(call, registry)]
+        over = (
+            "cost budget"
+            if usage.cost_usd > max_cost
+            else "tool budget"
+            if tool_calls_made > budget.max_tool_calls
+            else ""
+        )
+        if over:
+            # The calls asked for are answered (not run), so the conversation stays well formed.
+            for call in calls:
+                skipped: Message = {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": "Not run: the turn's limit was reached.",
+                }
+                messages.append(skipped)
+                yield MessageEmitted(skipped, Trust.SYSTEM)
+            async for event in wrap_up(StopReason.BUDGET_EXHAUSTED, over):
+                yield event
+            return
+
+        stalled = False
+        for call in calls:
+            call_counts[_signature(call)] += 1
+            if call_counts[_signature(call)] > budget.max_identical_calls + 1:
+                stalled = True
+
+        for call in calls:
+            if (tool := registry.get(call.name)) is not None:
+                yield ToolStarted(call, deadline_of(tool), _call_may_act(tool, call))
+        started = time.monotonic()
+        try:
+            executions = await _execute_calls(
+                calls,
+                registry,
+                guardian,
+                settings,
+                context_trust,
+                call_counts,
+                budget,
+                waiting,
+            )
+        except Exception as exc:
+            # The assistant message asking for these calls is already journaled: each gets an
+            # answer, or every later request in this thread would be refused by the provider.
+            log.exception("loop.tool_step_failed", thread=settings.thread_id)
+            stopped = f"Not run: an internal error stopped the step ({type(exc).__name__})."
+            for call in calls:
+                answer: Message = {"role": "tool", "tool_call_id": call.id, "content": stopped}
+                messages.append(answer)
+                yield MessageEmitted(answer, Trust.SYSTEM)
+            yield finished(StopReason.TOOL_ERROR, last_text, repr(exc))
+            return
+        tool_seconds += time.monotonic() - started
+        worked = True
+        stopped_now = any(reason == STOPPED_CALL for _, _, reason in executions)
+        for call, result, reason in executions:
+            if call.name == "plan" and not result.is_error:
+                open_steps = _open_steps(call)
+            switch = result.data.get(SWITCH_MODEL)
+            if isinstance(switch, str) and switch and not result.is_error:
+                log.info("loop.model_switched", thread=settings.thread_id, model=switch)
+                model = switch
+                max_cost = max(max_cost, float(result.data.get(SWITCH_COST, max_cost)))
+            context_trust = min(context_trust, result.trust)
+            content = result.shown()
+            if result.is_error and result.content != SKIPPED and reason != REPEAT_REFUSED:
+                # The same failure twice, whatever the arguments: say once that it will not pass.
+                failure = (call.name, result.content[:200])
+                failures[failure] += 1
+                if failures[failure] == 2:
+                    log.info("loop.same_failure", thread=settings.thread_id, tool=call.name)
+                    content += SAME_FAILURE
+            tool_message: Message = {
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": content,
+            }
+            messages.append(tool_message)
+            yield ToolExecuted(call, result, reason)
+            yield MessageEmitted(tool_message, result.trust)
+
+        if stopped_now:
+            # He asked to stop and the call was cut: nothing more runs, and nothing is said.
+            yield finished(StopReason.HALTED, "")
+            return
+
+        if stalled:
+            async for event in wrap_up(StopReason.STALLED, "repeated identical calls"):
+                yield event
+            return
+
+        # Its last word came with the calls (D217): asked again, the model only says it twice.
+        # Not when a call failed, the plan has steps left or nothing was said to the owner.
+        # A call that only records (« ok, noté » with `remember`) has nothing to tell it either:
+        # asked again, Haiku answered the tool result and then wrote "noté" again (03/11, D223).
+        # Only when the words came with these very calls: records made silently, after words
+        # said earlier in the turn, are steps of a longer work (03/11, a memory sort cut after
+        # each batch of `forget_fact`, D235).
+        records_with_words = bool((response.text or "").strip()) and all(
+            _records(call, registry) for call in calls
+        )
+        ended = (
+            (response.ends_turn or records_with_words)
+            and not open_steps
+            and not any(result.is_error for _, result, _ in executions)
+            and _reached_him(messages[turn_start:])
+        )
+        if steer is not None:
+            interjection = await steer()
+            if interjection is not None:
+                message, trust = interjection
+                messages.append(message)
+                context_trust = min(context_trust, trust)
+                ended = False  # the owner wrote meanwhile: he gets an answer
+        if ended:
+            note = (
+                settings.finish_check("\n".join(told_in(messages[turn_start:])), called)
+                if settings.finish_check is not None and not checked
+                else None
+            )
+            checked = True
+            if note is None:
+                log.info("loop.ended_with_calls", thread=settings.thread_id)
+                yield finished(StopReason.COMPLETED, "")
+                return
+            unchecked: Message = {"role": "user", "content": note}
+            messages.append(unchecked)
+            yield MessageEmitted(unchecked, Trust.SYSTEM)
+
+
+def _records(call: ToolCall, registry: ToolRegistry) -> bool:
+    """A call whose result tells the model nothing it needs (`Tool.informs`)."""
+    tool = registry.get(call.name)
+    if tool is None:
+        return False
+    try:
+        return not tool.informs_for(tool.parse(call.arguments))
+    except ToolInputError:
+        return False  # the call fails, and its error comes back to the model
+
+
+def _reached_him(messages: list[Message]) -> bool:
+    """Something left during the turn: the words beside a call do. A final reply sent back by a
+    nudge never did, and counting it ended a turn in silence (02/11, « Ah voilà », D219)."""
+    return bool(told_in(messages))
+
+
+def _open_steps(call: ToolCall) -> list[str]:
+    """The steps of a `plan` call not done yet."""
+    try:
+        arguments: object = json.loads(call.arguments or "{}")
+    except json.JSONDecodeError:
+        return []
+    steps = cast(dict[str, object], arguments).get("steps") if isinstance(arguments, dict) else None
+    if not isinstance(steps, list):
+        return []
+    entries = [cast(dict[str, object], s) for s in cast(list[object], steps) if isinstance(s, dict)]
+    return [str(e.get("text", "")) for e in entries if e.get("status") != "done"]
+
+
+def _called(call: ToolCall) -> str:
+    """`tool`, or `tool:action` for a tool with actions: what the finish check reads."""
+    try:
+        arguments: object = json.loads(call.arguments or "{}")
+    except json.JSONDecodeError:
+        return call.name
+    action = (
+        cast(dict[str, object], arguments).get("action") if isinstance(arguments, dict) else None
+    )
+    return f"{call.name}:{action}" if isinstance(action, str) and action else call.name
+
+
+async def _execute_calls(
+    calls: list[ToolCall],
+    registry: ToolRegistry,
+    guardian: Guardian,
+    settings: LoopSettings,
+    context_trust: Trust,
+    call_counts: Counter[tuple[str, str]],
+    budget: Budget,
+    waiting: Waiting | None = None,
+) -> list[tuple[ToolCall, ToolResult, str]]:
+    """Run consecutive concurrency-safe calls in parallel, everything else one at a time,
+    and return results in the original call order. Once the owner has written, calls not yet
+    started are answered as skipped."""
+    results: list[tuple[ToolCall, ToolResult, str]] = []
+    batch: list[ToolCall] = []
+    skipping = False
+
+    def owner_wrote() -> bool:
+        nonlocal skipping
+        skipping = skipping or (waiting is not None and waiting())
+        return skipping
+
+    def skip(call: ToolCall) -> tuple[ToolCall, ToolResult, str]:
+        return call, ToolResult(SKIPPED, is_error=True), "skipped: the owner wrote"
+
+    async def run_one(call: ToolCall) -> tuple[ToolCall, ToolResult, str]:
+        if settings.halted is not None and await settings.halted():
+            return call, ToolResult(CALLED_OFF, is_error=True), STOPPED_CALL
+        result, reason = await _execute_one(
+            call, registry, guardian, settings, context_trust, call_counts, budget
+        )
+        return call, result, reason
+
+    async def flush() -> None:
+        if batch:
+            if owner_wrote():
+                results.extend(skip(c) for c in batch)
+            else:
+                results.extend(await asyncio.gather(*(run_one(c) for c in batch)))
+            batch.clear()
+
+    for call in calls:
+        tool = registry.get(call.name)
+        if tool is not None and tool.concurrency_safe:
+            batch.append(call)
+            continue
+        await flush()
+        results.append(skip(call) if owner_wrote() else await run_one(call))
+    await flush()
+    return results
+
+
+async def execute_call(
+    call: ToolCall,
+    registry: ToolRegistry,
+    guardian: Guardian,
+    settings: LoopSettings,
+    context_trust: Trust,
+) -> tuple[ToolResult, str]:
+    """One call outside a turn (a hook's action, D225): the same checks as in the loop, the
+    guardian first. Returns the result and the guardian's reason."""
+    return await _execute_one(
+        registry.resolve(call), registry, guardian, settings, context_trust, Counter(), Budget()
+    )
+
+
+async def _execute_one(
+    call: ToolCall,
+    registry: ToolRegistry,
+    guardian: Guardian,
+    settings: LoopSettings,
+    context_trust: Trust,
+    call_counts: Counter[tuple[str, str]],
+    budget: Budget,
+) -> tuple[ToolResult, str]:
+    if call_counts[_signature(call)] > budget.max_identical_calls:
+        return (
+            ToolResult(
+                "You already made this exact call. Its result is above; change approach.",
+                is_error=True,
+            ),
+            REPEAT_REFUSED,
+        )
+    tool = registry.get(call.name)
+    if tool is None or call.name == DRAWER:
+        if call.name == DRAWER:
+            held = ", ".join(registry.drawer_names())
+            return ToolResult(f"No such tool in the drawer; it holds: {held}", is_error=True), (
+                "unknown tool"
+            )
+        return ToolResult(f"Unknown tool: {call.name}", is_error=True), "unknown tool"
+    try:
+        arguments = tool.parse(call.arguments)
+    except ToolInputError as exc:
+        if registry.in_drawer(call.name):  # the model has not seen its schema: show it
+            schema = json.dumps(tool.spec().parameters, ensure_ascii=False)
+            return ToolResult(f"{exc}\n{call.name} takes: {schema}", is_error=True), (
+                "invalid input"
+            )
+        return ToolResult(str(exc), is_error=True), "invalid input"
+
+    if (running := [n for n in stray_calls() if _family(n) == _family(tool.name)]) != []:
+        return (
+            ToolResult(
+                f"{', '.join(running)} from a stopped call still runs (it did not stop):"
+                f" {tool.name} waits until it ends. Tell him.",
+                is_error=True,
+            ),
+            STRAY_RUNNING,
+        )
+    decision = await guardian.decide(
+        ActionProposal(tool, arguments, context_trust, settings.thread_id, settings.asking)
+    )
+    if not decision.allowed:
+        return ToolResult(f"Refused by policy: {decision.reason}", is_error=True), decision.reason
+
+    ctx = ToolContext(
+        thread_id=settings.thread_id,
+        correlation_id=settings.correlation_id,
+        origin_event_id=settings.origin_event_id,
+        context_trust=context_trust,
+        timezone=settings.timezone,
+        grant=decision.grant,
+        alone=decision.reason == ALONE,
+        approved=decision.reason == APPROVED_DESPITE,
+        unrestricted=guardian.unrestricted(settings.thread_id),
+        idempotency_key=idempotency_key(
+            settings.thread_id, settings.correlation_id, tool.name, arguments
+        ),
+    )
+    started = time.monotonic()
+    limit = asyncio.timeout(deadline_of(tool))
+    try:
+        async with limit:
+            result = await _run(tool, arguments, ctx, settings)
+    except _Stopped as stop:
+        cut = _cut(tool, arguments, settings, time.monotonic() - started, stop.ended)
+        return cut, STOPPED_CALL
+    except TimeoutError as exc:
+        if not limit.expired():
+            log.exception("tool.failed", tool=tool.name)
+            return ToolResult(f"Tool error: TimeoutError: {exc}", is_error=True), "tool error"
+        return _timed_out(tool, arguments, settings, time.monotonic() - started), TIMED_OUT
+    except Exception as exc:
+        log.exception("tool.failed", tool=tool.name)
+        return ToolResult(f"Tool error: {type(exc).__name__}: {exc}", is_error=True), "tool error"
+    return _clip(result, tool), decision.reason
+
+
+class _Stopped(Exception):
+    """He asked to stop while the call ran: it was cut. `ended`: it really ended; otherwise it
+    still runs (`stray_calls`)."""
+
+    def __init__(self, ended: bool) -> None:
+        super().__init__()
+        self.ended = ended
+
+
+async def _run(
+    tool: Tool, arguments: BaseModel, ctx: ToolContext, settings: LoopSettings
+) -> ToolResult:
+    """The handler, cut as soon as he asks to stop (ORION-32: on 06/11 his Stop at 08:28 left a
+    `browser open` running until the restart at 08:42; it was only read between steps)."""
+    halted = settings.halted
+    if halted is None:
+        return await tool.handler(arguments, ctx)
+    task = asyncio.ensure_future(tool.handler(arguments, ctx))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=STOP_POLL_SECONDS)
+            if done:
+                return task.result()
+            if await halted():
+                task.cancel()
+                done, _ = await asyncio.wait({task}, timeout=STOP_GRACE_SECONDS)
+                if not done:
+                    _stray(task, tool, settings)
+                raise _Stopped(ended=bool(done))
+    finally:
+        if not task.done() and task not in _STRAYS:
+            task.cancel()
+
+
+def _stray(task: asyncio.Future[ToolResult], tool: Tool, settings: LoopSettings) -> None:
+    """A call that did not end when cut: kept in sight until it does, never said stopped."""
+    log.error(
+        "tool.stop_failed",
+        tool=tool.name,
+        thread=settings.thread_id,
+        correlation_id=settings.correlation_id,
+    )
+    _STRAYS[task] = tool.name
+
+    def ended(done: asyncio.Future[ToolResult]) -> None:
+        _STRAYS.pop(done, None)
+        failure = None if done.cancelled() else done.exception()
+        log.warning(
+            "tool.stray_ended",
+            tool=tool.name,
+            correlation_id=settings.correlation_id,
+            error=repr(failure) if failure is not None else None,
+        )
+
+    task.add_done_callback(ended)
+
+
+MAX_DEADLINE = 3600.0
+"""The longest any call may run, whatever its tool asks: a turn holds his thread (ORION-25).
+His approval is asked before, outside this limit."""
+
+
+def deadline_of(tool: Tool) -> float:
+    return min(tool.deadline, MAX_DEADLINE)
+
+
+def _may_have_acted(tool: Tool, arguments: BaseModel) -> bool:
+    """A call that, cut mid-way, may have changed something: one with an outside effect, or one
+    that acts on a page (a click may have sent the form before the cut)."""
+    return tool.effect_for(arguments) is Effect.EXTERNAL or tool.acts
+
+
+def _call_may_act(tool: Tool, call: ToolCall) -> bool:
+    try:
+        return _may_have_acted(tool, tool.parse(call.arguments))
+    except ToolInputError:
+        return False  # refused before it runs
+
+
+def _cut(
+    tool: Tool, arguments: BaseModel, settings: LoopSettings, seconds: float, ended: bool
+) -> ToolResult:
+    acted = _may_have_acted(tool, arguments)
+    log.info(
+        "tool.stopped",
+        tool=tool.name,
+        thread=settings.thread_id,
+        correlation_id=settings.correlation_id,
+        seconds=round(seconds, 1),
+        may_have_acted=acted,
+        ended=ended,
+    )
+    if ended:
+        said = f"Stopped: he asked to stop, the call was cut after {seconds:.0f} s."
+    else:
+        said = (
+            f"Stop failed: he asked to stop, but after {seconds:.0f} s the call still runs; the"
+            f" {_family(tool.name)} tools wait until it ends. Tell him it is not stopped."
+        )
+    if not acted:
+        return ToolResult(said, is_error=True)
+    said += " What it was doing may or may not have happened: check before, never redo it unasked."
+    return ToolResult(
+        said,
+        is_error=True,
+        outcome=Outcome.UNCERTAIN,
+        action_id=f"{tool.name}:{settings.correlation_id}",
+    )
+
+
+def _timed_out(
+    tool: Tool, arguments: BaseModel, settings: LoopSettings, seconds: float
+) -> ToolResult:
+    """A call cut at its deadline (ORION-25). What it may have changed outside is not known:
+    said so, so that it is checked rather than done twice."""
+    acted = _may_have_acted(tool, arguments)
+    log.warning(
+        "tool.timed_out",
+        tool=tool.name,
+        thread=settings.thread_id,
+        correlation_id=settings.correlation_id,
+        seconds=round(seconds, 1),
+        may_have_acted=acted,
+    )
+    said = f"Timed out: no answer after {seconds:.0f} s, the call was cut."
+    if not acted:
+        return ToolResult(said, is_error=True)
+    said += (
+        " What it was doing may or may not have happened. Check (the page, the mail, the"
+        " journal) before doing it again, and tell him it is not confirmed."
+    )
+    return ToolResult(
+        said,
+        is_error=True,
+        outcome=Outcome.UNCERTAIN,
+        action_id=f"{tool.name}:{settings.correlation_id}",
+    )
+
+
+ARTIFACT_MAX_BYTES = 1_000_000
+"""What of a clipped output the journal keeps whole (D282): past it, the first part, said so."""
+
+
+def _clip(result: ToolResult, tool: Tool) -> ToolResult:
+    """Too long: the start and the end are kept (where totals, errors and conclusions sit), and
+    the middle is cut, with what was cut said in its place. The whole output becomes an
+    artifact the note names, read back with the `artifact` tool (ORI-017): no cut without a
+    way to read the rest."""
+    content = result.content
+    limit = tool.max_output_chars
+    if len(content) <= limit:
+        return result
+    raw = content.encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    artifact_id = f"art-{digest[:12]}"
+    tail = limit // 3
+    head = limit - tail
+    cut = len(content) - head - tail
+    note = (
+        f"\n[… {cut} characters cut here, of {len(content)}. The whole output is kept as "
+        f'{artifact_id}: artifact(action="read" or "search", id="{artifact_id}") …]\n'
+    )
+    kept = content[:head] + note + (content[-tail:] if tail else "")
+    artifact: dict[str, object] = {
+        "artifact_id": artifact_id,
+        "sha256": digest,
+        "size": len(content),
+        "lines": content.count("\n") + 1,
+        "truncated": len(raw) > ARTIFACT_MAX_BYTES,
+        "content": raw[:ARTIFACT_MAX_BYTES].decode("utf-8", errors="ignore"),
+    }
+    return replace(result, content=kept, artifact=artifact)
+
+
+def _signature(call: ToolCall) -> tuple[str, str]:
+    """The call as the repeat counter sees it: its arguments as data, not as typed, so spaces
+    or key order do not make a new call."""
+    try:
+        data = json.loads(call.arguments or "{}")
+    except json.JSONDecodeError:
+        return call.name, call.arguments
+    return call.name, json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"))

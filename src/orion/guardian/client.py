@@ -1,0 +1,361 @@
+"""The core's side of the guardian process (D28).
+
+When Orion runs split, `orion serve` holds no secret but the LLM key: it reaches Inkbox,
+calendars and mailboxes through the guardian, over a Unix socket. The Inkbox client is the
+same as in a single process, pointed at the guardian, which adds the key once its rules allow
+the request.
+"""
+
+from __future__ import annotations
+
+import base64
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any, cast
+
+import httpx
+
+from orion.calendar.service import CalendarAccount
+from orion.channels.inkbox import GRANT_HEADER, InkboxClient
+from orion.channels.telegram import TelegramClient
+from orion.guardian.wire import (
+    ApprovalRequest,
+    MailPick,
+    MailRequest,
+    MailSearch,
+    batch_from_json,
+    mails_from_json,
+)
+from orion.mail.imap import Attached, Batch, Box, RawMail
+from orion.mail.service import MailAccount
+
+BASE_URL = "http://guardian"
+
+TransportFactory = Callable[[], httpx.AsyncBaseTransport]
+
+
+class GuardianUnavailableError(ConnectionError):
+    """The guardian process cannot be reached, or refused the request."""
+
+
+class GuardianClient:
+    def __init__(self, transports: TransportFactory, timeout: float = 60.0) -> None:
+        self._transports = transports
+        self._http = httpx.AsyncClient(base_url=BASE_URL, transport=transports(), timeout=timeout)
+
+    @classmethod
+    def over_socket(cls, path: Path) -> GuardianClient:
+        return cls(lambda: httpx.AsyncHTTPTransport(uds=str(path)))
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    async def health(self) -> dict[str, Any]:
+        try:
+            response = await self._http.get("/v1/health")
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise GuardianUnavailableError(f"guardian unreachable: {exc!r}") from exc
+        return response.json()
+
+    async def heartbeat(self) -> None:
+        """The core is alive: the guardian texts the owner when these stop (it can't)."""
+        await self.post("/v1/heartbeat", {})
+
+    def inkbox(self, max_attempts: int = 3) -> InkboxClient:
+        """An Inkbox client without a key: the guardian adds it."""
+        return InkboxClient(
+            "held-by-the-guardian",
+            f"{BASE_URL}/v1/inkbox",
+            transport=self._transports(),
+            max_attempts=max_attempts,
+        )
+
+    def telegram(self) -> TelegramClient:
+        """A Telegram client without the bot's token: the guardian adds it (D89)."""
+        return GuardedTelegramClient(f"{BASE_URL}/v1/telegram", self._transports())
+
+    async def telegram_login(self, init_data: str) -> int | None:
+        """Who opened the console from Telegram: the guardian checks the signature (D91)."""
+        try:
+            response = await self._http.post("/v1/telegram-login", content=init_data.encode())
+        except httpx.TransportError as exc:
+            raise GuardianUnavailableError(f"guardian unreachable: {exc!r}") from exc
+        found = _json(response).get("user_id")
+        return found if isinstance(found, int) else None
+
+    async def request_approval(
+        self, action: str, params: dict[str, Any], reason: str, conversation_id: str
+    ) -> tuple[str, str]:
+        """The guardian asks the owner itself. Returns (approval id, message id)."""
+        body = ApprovalRequest(
+            action=action, params=params, reason=reason[:400], conversation_id=conversation_id
+        )
+        data = await self.post("/v1/approvals", body.model_dump(mode="json"))
+        return str(data["approval_id"]), str(data["message_id"])
+
+    async def verify_webhook(
+        self, request_id: str, timestamp: str, signature: str, body: bytes
+    ) -> bool:
+        response = await self._http.post(
+            "/v1/inkbox-webhook/verify",
+            content=body,
+            headers={
+                "x-inkbox-request-id": request_id,
+                "x-inkbox-timestamp": timestamp,
+                "x-inkbox-signature": signature,
+            },
+        )
+        return response.status_code == 200 and bool(response.json().get("valid"))
+
+    async def calendar(self, account: CalendarAccount) -> str:
+        response = await self._http.get(f"/v1/calendar/{account.name}")
+        response.raise_for_status()
+        return response.text
+
+    async def calendar_change(self, account: str, change: Any, grant: str | None) -> None:
+        """Changed or cancelled by the guardian, if the owner agreed."""
+        await self.post(
+            f"/v1/calendar/{account}/changes",
+            change.model_dump(mode="json"),
+            headers={GRANT_HEADER: grant} if grant else None,
+        )
+
+    async def calendar_add(self, account: str, event: Any, grant: str | None) -> str:
+        """Written by the guardian, if the owner agreed (or it is a meeting both Orions
+        confirmed). Returns the event's UID."""
+        data = await self.post(
+            f"/v1/calendar/{account}/events",
+            event.model_dump(mode="json"),
+            headers={GRANT_HEADER: grant} if grant else None,
+        )
+        return str(data["uid"])
+
+    async def mail(
+        self,
+        account: MailAccount,
+        uidvalidity: int,
+        last_uid: int,
+        lookback_days: int,
+        limit: int,
+        now: datetime,
+    ) -> Batch:
+        cursor = MailRequest(
+            uidvalidity=uidvalidity,
+            last_uid=last_uid,
+            lookback_days=lookback_days,
+            limit=limit,
+            now=now,
+        )
+        return batch_from_json(
+            await self.post(f"/v1/mail/{account.name}", cursor.model_dump(mode="json"))
+        )
+
+    async def mail_search(
+        self,
+        account: MailAccount,
+        since: datetime,
+        before: datetime | None,
+        sender: str | None,
+        limit: int,
+        now: datetime,
+        box: Box = "inbox",
+    ) -> list[RawMail]:
+        """That window of the mailbox, read live by the guardian (D171)."""
+        query = MailSearch(since=since, before=before, sender=sender, limit=limit, now=now, box=box)
+        data = await self.post(f"/v1/mail/{account.name}/search", query.model_dump(mode="json"))
+        return mails_from_json(data["mails"])
+
+    async def mail_attachment(
+        self, account: MailAccount, uid: int, message_id: str, index: int, box: Box = "inbox"
+    ) -> Attached | None:
+        """One attached file of a mail, read by the guardian."""
+        query = MailPick(uid=uid, message_id=message_id, index=index, box=box)
+        data = await self.post(f"/v1/mail/{account.name}/attachment", query.model_dump())
+        if not data["found"]:
+            return None
+        raw = base64.b64decode(str(data["data"]))
+        return Attached(str(data["name"]), str(data["type"]), len(raw), raw)
+
+    async def mail_send(self, account: MailAccount, mail: Any, grant: str | None) -> str:
+        """Sent by the guardian, if the owner approved this very mail. Returns its Message-ID."""
+        data = await self.post(
+            f"/v1/mail/{account.name}/send",
+            mail.model_dump(mode="json"),
+            headers={GRANT_HEADER: grant} if grant else None,
+        )
+        return str(data["message_id"])
+
+    async def mail_tidy(
+        self,
+        account: MailAccount,
+        action: str,
+        uids: list[int],
+        grant: str | None,
+        folder: str | None = None,
+    ) -> Any:
+        """Archived, trashed, moved or unsubscribed by the guardian, if the owner approved this
+        batch."""
+        from orion.mail.tidy import Tidied
+
+        data = await self.post(
+            f"/v1/mail/{account.name}/tidy",
+            {"action": action, "uids": uids, "folder": folder},
+            headers={GRANT_HEADER: grant} if grant else None,
+        )
+        return Tidied.from_payload(data)
+
+    async def mail_mark(self, account: MailAccount, action: str, uids: list[int]) -> int:
+        """Read, unread, flagged or not: flags he can flip back, so no approval."""
+        data = await self.post(f"/v1/mail/{account.name}/mark", {"action": action, "uids": uids})
+        return int(data["done"])
+
+    async def mail_draft(self, account: MailAccount, mail: Any) -> None:
+        """A draft in the owner's drafts folder: it never leaves, so no approval."""
+        await self.post(f"/v1/mail/{account.name}/draft", mail.model_dump(mode="json"))
+
+    async def contact_send(
+        self, contact: str, conversation_id: str, text: str, grant: str | None
+    ) -> str:
+        """A message the owner approved for one of their contacts (D54)."""
+        data = await self.post(
+            "/v1/contacts/send",
+            {"contact": contact, "conversation_id": conversation_id, "text": text},
+            headers={GRANT_HEADER: grant} if grant else None,
+        )
+        return str(data["message_id"])
+
+    def relay(self) -> httpx.AsyncClient:
+        """Calls to an MCP server whose token the guardian holds (`/v1/mcp/<name>`, D95)."""
+        return httpx.AsyncClient(base_url=BASE_URL, transport=self._transports(), timeout=60.0)
+
+    async def ask_secret(self, name: str, why: str) -> None:
+        """The guardian sends the owner its own form for this secret (D94)."""
+        await self.post("/v1/secrets/ask", {"name": name, "why": why})
+
+    async def configure(
+        self,
+        changes: list[dict[str, Any]],
+        why: str,
+        grant: str | None,
+        module: str = "",
+        removing: bool = False,
+    ) -> dict[str, Any]:
+        """orion.toml changed by the guardian, which checks the owner's yes itself (D92).
+        With `module`, the yes is the one to install (or remove) it (D105). Returns whether it
+        changed and the file's digests before and after."""
+        body: dict[str, Any] = {"changes": changes, "why": why}
+        if module:
+            body |= {"module": module, "removing": removing}
+        return dict(
+            await self.post("/v1/config", body, headers={GRANT_HEADER: grant} if grant else None)
+        )
+
+    async def logins(self) -> list[dict[str, Any]]:
+        """The owner's logins the guardian keeps (D111): names and sites, never a secret."""
+        return list(await self.get("/v1/logins"))
+
+    async def accounts(self) -> dict[str, Any]:
+        """The sessions and logins the guardian keeps: `sessions` (name → sites), `logins`."""
+        return dict(await self.get("/v1/accounts"))
+
+    async def lend_login(
+        self, name: str, params: dict[str, Any], grant: str | None
+    ) -> dict[str, Any]:
+        """A login for one approved task: username, password, its sites and the loan's id
+        (for 2FA codes). Held in memory for the task only."""
+        return dict(
+            await self.post(
+                f"/v1/logins/{name}/lend", params, headers={GRANT_HEADER: grant} if grant else None
+            )
+        )
+
+    async def login_code(self, name: str, loan: str) -> str:
+        """The current 2FA code of a login lent for a task under way."""
+        return str((await self.post(f"/v1/logins/{name}/code", {"loan": loan}))["code"])
+
+    async def keep(self, site: str, username: str, password: str, url: str = "") -> dict[str, Any]:
+        """A login the owner gave in the console, kept by the guardian (D120). Its name, sites."""
+        body = {"site": site, "username": username, "password": password, "url": url}
+        return dict(await self.post("/v1/logins/keep", body))
+
+    async def ask_login(self, name: str, site: str, why: str) -> None:
+        """The owner gets the guardian's form on Telegram to give a login."""
+        await self.post("/v1/logins/ask", {"name": name, "site": site, "why": why})
+
+    # -- federation (D29) ----------------------------------------------------------------------
+
+    async def peers(self) -> list[dict[str, Any]]:
+        return list(await self.get("/v1/federation/peers"))
+
+    async def federation_inbox(self, after: int) -> list[dict[str, Any]]:
+        data = await self.get("/v1/federation/inbox", {"after": after})
+        return list(data["items"])
+
+    async def federation_send(
+        self,
+        peer: str,
+        kind: str,
+        context: str,
+        body: dict[str, Any],
+        grant: str | None = None,
+    ) -> dict[str, Any]:
+        """Signed and sent by the guardian, if the owner agreed to it (D29)."""
+        return await self.post(
+            "/v1/federation/send",
+            {"peer": peer, "type": kind, "context": context, "body": body},
+            headers={GRANT_HEADER: grant} if grant else None,
+        )
+
+    async def get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        try:
+            response = await self._http.get(path, params=params, headers=headers)
+        except httpx.TransportError as exc:
+            raise GuardianUnavailableError(f"guardian unreachable: {exc!r}") from exc
+        return _json(response)
+
+    async def post(
+        self, path: str, body: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> Any:
+        try:
+            response = await self._http.post(path, json=body, headers=headers)
+        except httpx.TransportError as exc:
+            raise GuardianUnavailableError(f"guardian unreachable: {exc!r}") from exc
+        return _json(response)
+
+
+class GuardedTelegramClient(TelegramClient):
+    """The Bot API through the guardian: same calls, no token in the URL, and files sent as
+    JSON so the guardian reads where they go before sending them itself."""
+
+    def __init__(self, base_url: str, transport: httpx.AsyncBaseTransport) -> None:
+        super().__init__("held-by-the-guardian", base_url, transport=transport)
+
+    def method_url(self, method: str) -> str:
+        return f"{self._base}/{method}"
+
+    def file_url(self, file_path: str) -> str:
+        return f"{self._base}/file/{file_path}"
+
+    async def send_file(
+        self, chat_id: int, method: str, field_name: str, name: str, data: bytes, caption: str
+    ) -> int:
+        file = {"name": name, "data": base64.b64encode(data).decode("ascii")}
+        sent = await self.call(method, chat_id=chat_id, caption=caption or None, file=file)
+        return int(cast(dict[str, Any], sent)["message_id"])
+
+
+def _json(response: httpx.Response) -> Any:
+    if response.status_code >= 400:
+        try:
+            detail = str(response.json().get("error", response.text))
+        except ValueError:
+            detail = response.text[:300]
+        raise GuardianUnavailableError(detail)
+    return response.json()

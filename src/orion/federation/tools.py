@@ -1,0 +1,176 @@
+"""Tools for meetings with other people's Orion."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from orion.core.events import Trust
+from orion.federation.meetings import MeetingDesk
+from orion.guardian.client import GuardianUnavailableError
+from orion.initiative.tools import describe_moment, parse_moment
+from orion.tools.base import Effect, Reversibility, Tool, ToolContext, ToolResult
+from orion.tools.outcome import Outcome
+
+
+class PeersInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class MeetingProposeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    peer: str = Field(description="Whose Orion: the name the owner paired it under (see peers)")
+    title: str = Field(min_length=1, max_length=80, description="Short, e.g. 'Déjeuner'")
+    duration_minutes: int = Field(ge=15, le=480)
+    window_start: str = Field(description="ISO date-time: earliest start, local time")
+    window_end: str = Field(description="ISO date-time: latest end, local time")
+    also: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="For a meeting of several: the other people's Orions invited too",
+    )
+
+
+class PeerMessageInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    peer: str = Field(description="Whose Orion: the name the owner paired it under (see peers)")
+    text: str = Field(min_length=1, max_length=2000, description="The exact words to send")
+
+
+class MeetingsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+def federation_tools(desk: MeetingDesk) -> list[Tool]:
+    async def peers(args: Any, ctx: ToolContext) -> ToolResult:
+        try:
+            found = await desk.peers()
+        except GuardianUnavailableError as exc:
+            return ToolResult(f"The guardian did not answer: {exc}", is_error=True)
+        if not found:
+            return ToolResult(
+                "Aucun Orion relié. Pour en relier un : dans l'app, Réglages > Autres Orions, il "
+                "crée une invitation, et l'autre accepte le code dans la sienne."
+            )
+        return ToolResult("\n".join(f"- {p['label']} ({p['instance']})" for p in found))
+
+    async def meeting_propose(args: Any, ctx: ToolContext) -> ToolResult:
+        try:
+            start = parse_moment(args.window_start, ctx.timezone)
+            end = parse_moment(args.window_end, ctx.timezone)
+        except ValueError:
+            return ToolResult("window_start and window_end must be ISO date-times", is_error=True)
+        if end <= start:
+            return ToolResult("The window ends before it starts.", is_error=True)
+        if end - start > timedelta(days=31):
+            return ToolResult("Keep the window within a month.", is_error=True)
+        try:
+            meeting_id, slots = await desk.propose(
+                args.peer,
+                args.title,
+                timedelta(minutes=args.duration_minutes),
+                start,
+                end,
+                ctx.grant,
+                ctx.correlation_id,
+                also=args.also,
+            )
+        except LookupError as exc:
+            return ToolResult(f"Not sent: {exc}.", is_error=True)
+        except GuardianUnavailableError as exc:
+            return ToolResult(f"Not sent, the guardian refused: {exc}", is_error=True)
+        offered = ", ".join(describe_moment(s, ctx.timezone) for s in slots)
+        # The guardian answers only once the other Orion took it (D258): taken, not agreed to.
+        said = (
+            f"Sondage envoyé ({meeting_id}) à {len(args.also) + 1} Orion avec "
+            f"{len(slots)} créneau(x) libre(s) : {offered}. Le premier qui va à tout le "
+            "monde leur sera proposé ; la réponse arrivera d'elle-même."
+            if args.also
+            else f"Proposition envoyée ({meeting_id}) avec {len(slots)} créneau(x) libre(s) : "
+            f"{offered}. La réponse arrivera d'elle-même."
+        )
+        return ToolResult(
+            said,
+            data={"meeting_id": meeting_id},
+            outcome=Outcome.CONFIRMED,
+            action_id=f"meeting:{meeting_id}",
+            proof="pris par l'autre Orion",
+        )
+
+    async def peer_message(args: Any, ctx: ToolContext) -> ToolResult:
+        try:
+            label = await desk.say(args.peer, args.text, ctx.grant, ctx.correlation_id)
+        except LookupError as exc:
+            return ToolResult(f"Not sent: {exc}.", is_error=True)
+        except GuardianUnavailableError as exc:
+            return ToolResult(f"Not sent, the guardian refused: {exc}", is_error=True)
+        return ToolResult(
+            f"Envoyé à l'Orion de {label}. Sa réponse arrivera d'elle-même : tu lui répondras "
+            "dans votre conversation à vous, et il en entendra parler.",
+            outcome=Outcome.CONFIRMED,
+            action_id=f"peer:{label}:{ctx.correlation_id}",
+            proof="pris par l'autre Orion",
+        )
+
+    async def meetings(args: Any, ctx: ToolContext) -> ToolResult:
+        await desk.start()
+        known = sorted(desk.state.meetings.values(), key=lambda m: m.id)
+        if not known:
+            return ToolResult("Aucun rendez-vous négocié avec un autre Orion.")
+        lines: list[str] = []
+        for m in known:
+            when = f", {describe_moment(m.slot, ctx.timezone)}" if m.slot else ""
+            side = "proposé par toi" if m.role == "asked" else "proposé par lui"
+            lines.append(f"- « {m.title} » avec {m.label} ({side}) : {m.status}{when}")
+        return ToolResult("\n".join(lines), trust=Trust.TRUSTED_PEER)
+
+    return [
+        Tool(
+            name="peers",
+            description="The other people's Orions this one is paired with.",
+            input_model=PeersInput,
+            handler=peers,
+            effect=Effect.NONE,
+            reversibility=Reversibility.REVERSIBLE,
+            concurrency_safe=True,
+            accepts_untrusted_context=True,
+        ),
+        Tool(
+            name="meeting_propose",
+            description="Arrange a meeting with someone through their Orion: offers the owner's "
+            "free slots in the window (nothing else of their calendar), the other Orion picks "
+            "one with its owner's agreement. Several people: `also`, and the first slot free "
+            "for everyone is found. Needs the owner's approval. The outcome is reported when it "
+            "lands.",
+            input_model=MeetingProposeInput,
+            handler=meeting_propose,
+            effect=Effect.EXTERNAL,
+            reversibility=Reversibility.IRREVERSIBLE,
+        ),
+        Tool(
+            name="peer_message",
+            description="Write to someone's Orion, freely: a question, news, a favour. Its "
+            "answer comes back in a conversation of your own with that Orion, where you answer "
+            "it yourself; the owner hears of it. He approves the exact words of a first "
+            "message.",
+            input_model=PeerMessageInput,
+            handler=peer_message,
+            effect=Effect.EXTERNAL,
+            reversibility=Reversibility.IRREVERSIBLE,
+            accepts_untrusted_context=True,
+        ),
+        Tool(
+            name="meetings",
+            description="Meetings negotiated with other Orions, and where each stands.",
+            input_model=MeetingsInput,
+            handler=meetings,
+            effect=Effect.NONE,
+            reversibility=Reversibility.REVERSIBLE,
+            concurrency_safe=True,
+            accepts_untrusted_context=True,
+        ),
+    ]

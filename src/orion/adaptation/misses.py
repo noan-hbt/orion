@@ -1,0 +1,129 @@
+"""What went wrong for real, as Orion himself judged it (D152, D177).
+
+The behavioural evaluations (`evals`) are written by hand, after the owner tells someone what
+went wrong. Orion already sees it: every evening his pass rereads the day, with the 👎 the
+owner put on his messages, and notes each exchange he got wrong (`missed`): what was asked,
+what he answered, how the owner showed it, and what went wrong. No pattern on his words
+decides it: a « non » that starts an ordinary answer is not a correction, and a correction
+put otherwise still is. `orion misses` lists them, and `--case N` writes one as the start of
+an evaluation case, to finish by hand and add to `evals/cases.py`; `orion evals export` writes
+the week's, one draft each, for him to go over once a week. Nothing is sent anywhere: it is
+read on his server, by him.
+
+    adaptation.missed
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from orion.adaptation.signals import collect
+from orion.core.events import Event
+
+MISSED = "adaptation.missed"
+
+
+@dataclass(frozen=True)
+class Miss:
+    at: datetime
+    """When the exchange took place."""
+    asked: str
+    """What he had asked ('' when unknown)."""
+    answered: str
+    """What Orion answered."""
+    said: str
+    """How he showed it: his correction, or « 👎 »."""
+    why: str
+    """What went wrong, in Orion's words."""
+
+
+def misses(events: Sequence[Event], zone: ZoneInfo) -> list[Miss]:
+    """Oldest first, each exchange once. `events`: the journal.
+
+    An evening pass cut short by the model is run again and rereads the same day: it may note
+    the same exchange a second time, worded otherwise. The exchange (when, what he said, what
+    Orion answered) is what counts, so the first note of it is kept."""
+    found: dict[tuple[datetime, str, str], Miss] = {}
+    for e in events:
+        if e.kind != MISSED or e.redacted:
+            continue
+        payload = e.payload
+        miss = Miss(
+            datetime.fromisoformat(str(payload["at"])).astimezone(zone),
+            str(payload.get("asked", "")),
+            str(payload.get("answered", "")),
+            str(payload.get("said", "")),
+            str(payload.get("why", "")),
+        )
+        found.setdefault((miss.at, miss.said, miss.answered), miss)
+    return sorted(found.values(), key=lambda m: m.at)
+
+
+def dislikes(events: Sequence[Event], zone: ZoneInfo, now: datetime, after_seq: int) -> list[str]:
+    """His 👎 since `after_seq`, each with the message it was on, for the evening pass.
+    `events`: the whole journal (the message may be older)."""
+    return [
+        f"[{s.at:%Y-%m-%d %H:%M}] {s.text}"
+        for s in collect(events, zone, now, after_seq=after_seq)
+        if s.kind == "reaction" and s.text.startswith("👎")
+    ]
+
+
+def as_case(miss: Miss, name: str) -> str:
+    """The start of an evaluation case: what he said, when; the check is to write."""
+    at = miss.at
+    origin = f"Raté en vrai le {at:%d/%m/%Y} : Orion a répondu « {miss.answered} »"
+    if miss.said:
+        origin += f", et il a réagi : « {miss.said} »"
+    if miss.why:
+        origin += f" ({miss.why})"
+    return "\n".join(
+        [
+            "    Case(",
+            f"        name={name!r},",
+            f"        origin={origin + '.'!r},",
+            f"        at=paris({at.year}, {at.month}, {at.day}, {at.hour}, {at.minute}),",
+            "        facts=OWNER,",
+            f"        steps=(Say({(miss.asked or 'TODO : ce qu il avait demandé')!r}),),",
+            "        checks=(judged('TODO : la bonne réponse fait-elle … ?'),),",
+            "    ),",
+        ]
+    )
+
+
+def drafts(found: Sequence[Miss], since: datetime, until: datetime) -> str:
+    """The misses between `since` and `until`, each as a draft case for `evals/cases.py`: the
+    exchange in comments, then the case, its check to write. Drafts nobody accepts cost
+    nothing: he keeps the ones worth it."""
+    chosen = [m for m in found if since <= m.at <= until]
+    span = f"du {since:%d/%m} au {until:%d/%m}"
+    if not chosen:
+        return f"# Aucun raté relevé {span}."
+    lines = [
+        f"# Ratés {span} : {len(chosen)} brouillon(s) de cas d'évaluation.",
+        "# Pour chacun : le garder s'il vaut un cas, remplir les TODO, le coller dans CASES",
+        "# (evals/cases.py), puis vérifier avec `uv run python -m evals --case <nom>`.",
+    ]
+    taken: set[str] = set()
+    for index, miss in enumerate(chosen, 1):
+        name = base = f"rate_du_{miss.at:%d_%m_%H%M}"
+        repeat = 1
+        while name in taken:  # two misses in the same minute: CASES names must stay unique
+            repeat += 1
+            name = f"{base}_{repeat}"
+        taken.add(name)
+        lines += ["", f"# {index}. {miss.at:%d/%m %H:%M} · {_line(miss.why) or '?'}"]
+        if miss.asked:
+            lines.append(f"#    lui : {_line(miss.asked)}")
+        lines.append(f"#    Orion : {_line(miss.answered)}")
+        if miss.said:
+            lines.append(f"#    puis lui : {_line(miss.said)}")
+        lines.append(as_case(miss, name))
+    return "\n".join(lines)
+
+
+def _line(text: str) -> str:
+    return " ".join(text.split())

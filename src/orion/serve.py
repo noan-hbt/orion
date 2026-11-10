@@ -1,0 +1,198 @@
+"""`orion serve`: the always-on daemon.
+
+The core services (the owner-turn worker, the initiative engine) plus whatever the enabled
+modules add: channels, voice, background learning. If a service keeps crashing, the supervisor
+stops everything after trying to tell the owner, rather than running half-dead.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import signal
+import sys
+from datetime import timedelta
+
+import structlog
+
+from orion.app import App
+from orion.channels.inbox import OwnerInbox
+from orion.cognition.review import GroundingReview
+from orion.cognition.verifier import Verifier
+from orion.core import busy
+from orion.core.supervisor import Supervisor
+from orion.guardian.client import GuardianClient, GuardianUnavailableError
+from orion.initiative.engine import InitiativeEngine, InitiativeSettings, Report
+from orion.memory.batch import MemoryBatcher
+from orion.memory.extractor import MemoryExtractor
+from orion.modules.base import Daemon, ModuleError
+from orion.providers.base import splits_messages
+from orion.providers.spending import Spending
+from orion.runtime import OWNER_THREAD, Orion
+
+log = structlog.get_logger(__name__)
+
+ServeError = ModuleError
+"""Configuration problem that prevents the daemon from starting."""
+
+
+def owner_inbox(app: App) -> OwnerInbox:
+    return OwnerInbox(
+        app.orion,
+        app.config.channels.imessage.coalesce_seconds,
+        split=splits_messages(app.config.agent.model),
+    )
+
+
+def memory_batcher(app: App) -> MemoryBatcher:
+    """Memory is read after a conversation, not after every message (D86)."""
+    memory = app.config.memory
+    return MemoryBatcher(
+        app.journal,
+        app.memory,
+        MemoryExtractor(
+            app.provider,
+            app.memory,
+            app.config.agent.extractor_model,
+            app.config.effort("memory"),
+            told_later=app.timers.told_later,
+        ),
+        OWNER_THREAD,
+        app.config.agent.timezone,
+        idle=timedelta(minutes=memory.extract_idle_minutes),
+        min_messages=memory.extract_min_messages,
+        max_wait=timedelta(minutes=memory.extract_max_wait_minutes),
+    )
+
+
+async def start(app: App, inbox: OwnerInbox, supervisor: Supervisor) -> Daemon:
+    """Plug every module into the daemon, then the initiative engine on top of them."""
+    if not any(module.channel for module in app.modules):
+        raise ModuleError(
+            "no owner channel is enabled (e.g. `enabled = true` in [channels.imessage])"
+        )
+    daemon = Daemon(app.plate, app.orion, inbox, supervisor)
+    await app.orion.settle_cut_calls()
+    daemon.reports.append(CutCallReports(app.orion))
+    supervisor.add("inbox", inbox.run)
+    supervisor.add("memory.batch", memory_batcher(app).run)
+    guardian = app.plate.guardian
+    if guardian is not None:
+        every = app.config.guardian.heartbeat_seconds
+        supervisor.add("guardian.heartbeat", lambda: heartbeat(guardian, every))
+    for module in app.modules:
+        await module.serve(daemon)
+    if isinstance(app.provider, Spending):
+        daemon.alerts.append(app.provider)
+
+    verifier = Verifier(
+        app.provider, app.config.agent.verifier_model, app.config.effort("verifier")
+    )
+    if app.config.agent.verifier_model:
+        # His replies' claims are read again in the background, once the exchange settles (D253).
+        review = GroundingReview(app.orion, verifier, app.journal)
+        supervisor.add("grounding.review", review.run)
+        daemon.alerts.append(review)
+    initiative = app.config.initiative
+    autonomy = app.plate.autonomy
+    grant_tool = app.orion.registry.get("autonomy_grant")
+    if autonomy is not None and grant_tool is not None:
+        quiet = InitiativeSettings(
+            quiet_start=initiative.quiet_start, quiet_end=initiative.quiet_end
+        ).is_quiet
+        supervisor.add("autonomy.ritual", lambda: autonomy.run(app.approver, grant_tool, quiet))
+    if initiative.enabled:
+        engine = InitiativeEngine(
+            app.orion,
+            app.journal,
+            app.timers,
+            inbox,
+            InitiativeSettings(
+                timezone=app.config.agent.timezone,
+                thread_id=OWNER_THREAD,
+                digests=tuple(initiative.digests),
+                quiet_start=initiative.quiet_start,
+                quiet_end=initiative.quiet_end,
+                daily_budget=initiative.daily_budget,
+                verifier=initiative.verifier,
+            ),
+            memory=app.memory.store,
+            verifier=verifier,
+            reports=daemon.reports,
+            caller=daemon.caller,
+            alerts=daemon.alerts,
+            digests=daemon.digests,
+            presence=daemon.presence,
+        )
+        supervisor.add("initiative", lambda: engine.run(initiative.tick_seconds))
+    log.info(
+        "orion.serving",
+        modules=[module.name for module in app.modules],
+        initiative=initiative.enabled,
+    )
+    return daemon
+
+
+class CutCallReports:
+    """Each call a restart left UNCERTAIN, told once (ORI-007): the ledger keeps the key."""
+
+    def __init__(self, orion: Orion) -> None:
+        self._orion = orion
+
+    async def reports(self) -> list[Report]:
+        return [
+            Report(
+                key=f"cut:{c.key}",
+                notice=f"J'ai redémarré pendant un appel « {c.tool} » ({c.arguments[:300]}) :"
+                " je ne sais pas s'il a eu lieu. Dis-le-lui en une phrase, sans le refaire ;"
+                " propose de vérifier.",
+                why="un appel qui pouvait agir a été coupé par un redémarrage",
+                fallback=f"Coupé par un redémarrage : « {c.tool} » a peut-être eu lieu,"
+                " peut-être pas. Je n'ai rien refait.",
+            )
+            for c in self._orion.cut_calls.settled.values()
+        ]
+
+
+async def heartbeat(guardian: GuardianClient, every: float) -> None:
+    """Tell the guardian the core is alive; it warns the owner when this stops."""
+    while True:
+        try:
+            await guardian.heartbeat()
+        except GuardianUnavailableError:
+            log.warning("guardian.heartbeat_failed", exc_info=True)
+        await asyncio.sleep(every)
+
+
+async def serve(app: App) -> None:
+    busy.configure(app.config.data_dir)
+    inbox = owner_inbox(app)
+
+    async def escalate(service: str, error: BaseException) -> None:
+        try:
+            await inbox.notify(
+                f"Je m'arrête : le service {service} plante en boucle ({error!r}). "
+                "Regarde les logs du serveur.",
+                correlation_id="supervisor",
+            )
+        except Exception:
+            log.exception("supervisor.escalation_failed", service=service)
+
+    supervisor = Supervisor(escalate)
+    await start(app, inbox, supervisor)
+    running = asyncio.create_task(supervisor.run(), name="supervisor")
+    signalled: list[int] = []
+
+    def stop(sig: int) -> None:
+        signalled.append(sig)
+        running.cancel()
+
+    if sys.platform != "win32":  # no loop signal handlers there; Ctrl+C still stops it
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop, sig)
+    try:
+        await running
+    except asyncio.CancelledError:
+        if not signalled:
+            raise
+        log.info("orion.stopped", signal=signalled[0])  # a clean stop, not a failure

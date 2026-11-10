@@ -1,0 +1,273 @@
+"""Provider-neutral model interface.
+
+Messages use the OpenAI chat format, which OpenRouter and most providers accept. The exact
+message dicts sent to a provider are what gets journaled, so a conversation replays byte for
+byte: that is what keeps the prompt prefix stable and the provider cache warm.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Literal, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field
+
+Message = dict[str, Any]
+"""One chat message in OpenAI format: role, content, and optionally tool_calls / tool_call_id."""
+
+
+def told(message: Message) -> list[str]:
+    """The texts an assistant message sent him with `tell`: they live in its tool calls only."""
+    texts: list[str] = []
+    calls: list[dict[str, Any]] = message.get("tool_calls") or []
+    for call in calls:
+        function: dict[str, Any] = call.get("function") or {}
+        if function.get("name") != "tell":
+            continue
+        try:
+            text: Any = json.loads(str(function.get("arguments") or "{}")).get("text", "")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(text, str) and text.strip():
+            texts.append(text.strip())
+    return texts
+
+
+def spoken(message: Message) -> str:
+    """All an assistant message said to him: its words, then what it sent with `tell`."""
+    content = message.get("content")
+    words = content.strip() if isinstance(content, str) else ""
+    return "\n".join([t for t in [words, *told(message)] if t])
+
+
+CACHE_MINUTES = (
+    ("claude-code:", 60),
+    ("anthropic/", 5),
+    ("deepseek/", 240),
+)
+"""How long a model's prompt cache outlives the last request, by spec prefix (after an
+`openrouter:` provider). Anthropic keeps it 5 minutes, an hour through Claude Code on a plan
+(`ephemeral_1h_input_tokens`); DeepSeek keeps it on disk for hours."""
+CACHE_MINUTES_ELSE = 60
+"""Others (OpenAI and the ChatGPT plan keep theirs up to an hour): the longest they may."""
+
+
+def cache_minutes(spec: str) -> int:
+    """Until when changing the start of a conversation would cost its cache."""
+    model = spec.removeprefix("openrouter:")
+    return next((m for prefix, m in CACHE_MINUTES if model.startswith(prefix)), CACHE_MINUTES_ELSE)
+
+
+def on_plan(spec: str) -> bool:
+    """Whether this model runs on the Claude plan, where the window is capped (D210)."""
+    return spec.removeprefix("openrouter:").startswith("claude-code:")
+
+
+def window_tokens(spec: str, configured: int, plan: int) -> int:
+    """How big a conversation's window may grow on this model: on the Claude plan, never past
+    `plan` (`agent.plan_window_tokens`)."""
+    return min(configured, plan) if on_plan(spec) else configured
+
+
+def on_chatgpt(spec: str) -> bool:
+    """Whether this model runs on the ChatGPT plan, the one provider that still offers `tell`
+    and whose constitution says so (D229)."""
+    return spec.startswith("chatgpt:")
+
+
+def splits_messages(spec: str) -> bool:
+    """Whether Orion may say two things as two messages (`<suite/>`, D163): on the ChatGPT plan
+    only, where the owner finds it reads well (D230). Haiku on the Claude plan used it to say
+    the same thing twice (D214)."""
+    return on_chatgpt(spec)
+
+
+def chars_per_token(spec: str) -> float:
+    """How many characters make a token, roughly. Anthropic counts about 2 on Orion's real
+    conversations (measured: 12 693 characters, 6 456 tokens). OpenAI's `o200k_base` counts
+    3.6 to 3.7 on Orion's system message, tool schemas and French messages (measured, D229):
+    3.5, since tool results (JSON, links) count worse and a low guess cuts sooner, not later.
+    The others about 3."""
+    model = spec.removeprefix("openrouter:")
+    if model.startswith(("claude-code:", "anthropic/")):
+        return 2
+    return 3.5 if model.startswith(("chatgpt:", "openai/")) else 3
+
+
+class ToolSpec(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+    def to_openai(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
+
+
+class ToolCall(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    arguments: str = Field(description="Raw JSON string as produced by the model")
+
+
+class Usage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: float = 0.0
+    equivalent_usd: float = 0.0
+    """What a plan's call would have cost at API prices: not spent, never counted as spending."""
+
+    def __add__(self, other: Usage) -> Usage:
+        return Usage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+            cached_tokens=self.cached_tokens + other.cached_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            cost_usd=self.cost_usd + other.cost_usd,
+            equivalent_usd=self.equivalent_usd + other.equivalent_usd,
+        )
+
+    @property
+    def cache_hit_ratio(self) -> float:
+        return self.cached_tokens / self.prompt_tokens if self.prompt_tokens else 0.0
+
+
+class QuotaWindow(BaseModel):
+    """How much of a plan's allowance one window has used, as the provider said it last."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(description="`five_hour`, `seven_day`, ... or `<minutes>_min`")
+    used: float = Field(description="0 to 1")
+    resets_at: str | None = Field(default=None, description="ISO time, when known")
+
+
+class Credits(BaseModel):
+    """What is left on a prepaid account (OpenRouter), read when asked."""
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: str
+    total: float | None = None
+    used: float
+    remaining: float | None = None
+
+
+@runtime_checkable
+class Metered(Protocol):
+    """A provider that can say what is left on its account."""
+
+    async def credits(self) -> Credits | None: ...
+
+
+class ModelRequest(BaseModel):
+    model: str
+    messages: list[Message]
+    tools: list[ToolSpec] = Field(default_factory=list[ToolSpec])
+    session_id: str | None = Field(
+        default=None, description="Stable per conversation, for cache-preserving sticky routing"
+    )
+    max_tokens: int | None = None
+    temperature: float | None = None
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    json_output: bool = Field(default=False, description="Ask for a single JSON object reply")
+    no_tools: bool = Field(
+        default=False,
+        description="Tools stay declared (the cached prefix is unchanged) but none may be called",
+    )
+    image_output: bool = Field(
+        default=False, description="Ask an image model for pictures (`ModelResponse.images`)"
+    )
+    web_search: int | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+        description="Let the provider search the web first, with this many results (the web "
+        "search only: what comes back is web content)",
+    )
+
+
+class Citation(BaseModel):
+    """A page the provider's web search read to answer."""
+
+    model_config = ConfigDict(frozen=True)
+
+    url: str
+    title: str = ""
+
+
+class ModelResponse(BaseModel):
+    message: Message = Field(description="Assistant message exactly as it will be journaled")
+    text: str
+    tool_calls: list[ToolCall]
+    finish_reason: str | None
+    usage: Usage
+    model: str
+    provider: str | None = None
+    attempts: int = 1
+    citations: list[Citation] = Field(default_factory=list[Citation])
+    ends_turn: bool = Field(
+        default=False,
+        description="The model's last word comes with its tool calls: once they ran without "
+        "error, the turn ends there, with no request to say it again (D217)",
+    )
+    images: list[str] = Field(
+        default_factory=list[str], description="Pictures an image model made, as data: URLs"
+    )
+    quota: list[QuotaWindow] = Field(
+        default_factory=list[QuotaWindow],
+        description="What the plan's windows have used, when the provider says (a plan only)",
+    )
+    used_up: list[str] = Field(
+        default_factory=list[str],
+        description="The plans found used up before a fallback answered (`ProviderError.used_up`)",
+    )
+
+
+class ProviderError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        status: int | None = None,
+        used_up: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status = status
+        self.used_up: list[str] = [used_up] if used_up else []
+        """The plans whose allowance was found used up on the way (the router adds those it
+        fell back from): a plan that tells nothing of its windows says this much."""
+
+
+class ModelProvider(Protocol):
+    name: str
+
+    async def complete(self, request: ModelRequest) -> ModelResponse: ...
+
+
+@runtime_checkable
+class Embedder(Protocol):
+    """A provider that also turns texts into vectors (semantic memory search)."""
+
+    async def embed(self, model: str, texts: list[str]) -> list[list[float]]: ...
+
+
+@runtime_checkable
+class Speaker(Protocol):
+    """A provider that also says a text aloud, as raw 16-bit mono PCM at 24 kHz."""
+
+    async def speak(self, model: str, text: str, voice: str) -> bytes: ...

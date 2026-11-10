@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="orion-title">
+  <title id="orion-title">Orion</title>
+  <defs>
+    <radialGradient id="orion-wash" cx=".15" cy=".9" r="1">
+      <stop stop-color="#AEB7FF"/>
+      <stop offset=".55" stop-color="#DDDCFA"/>
+      <stop offset="1" stop-color="#EEEAF9"/>
+    </radialGradient>
+    <linearGradient id="orion-body" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#6F7DFF"/>
+      <stop offset="1" stop-color="#3F4BD8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#orion-wash)"/>
+  <ellipse cx="256" cy="256" rx="214" ry="70" transform="rotate(-14 256 256)" fill="none" stroke="#1A1433" stroke-opacity=".25" stroke-width="5"/>
+  <circle cx="256" cy="256" r="130" fill="url(#orion-body)"/>
+  <circle cx="214" cy="214" r="56" fill="#EEF3FF"/>
+</svg>

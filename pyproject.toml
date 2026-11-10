@@ -1,0 +1,71 @@
+[project]
+name = "orion"
+version = "0.1.0"
+description = "Orion: an always-on, proactive personal agent."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=44",
+    "fonttools>=4",
+    "httpx>=0.27,<1",
+    "icalendar>=6",
+    "numpy>=2",
+    "pillow>=11",
+    "pillow-heif>=1",
+    "playwright>=1.56",
+    "pydantic>=2.8,<3",
+    "pypdf>=6.21.1",
+    "recurring-ical-events>=3",
+    "starlette>=1.9,<2",
+    "structlog>=24.1",
+    "tomlkit>=0.13",
+    "tzdata>=2024.1",
+    "uvicorn>=0.54,<1",
+    "webauthn>=2.5",
+    "websockets>=13",
+]
+
+[project.scripts]
+orion = "orion.cli:main"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.380",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "time-machine>=3.5.1",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orion"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]
+markers = ["no_rebuild_check: the test builds a projection that is not a pure function of the journal on purpose"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC", "BLE", "S110", "TRY"]
+ignore = ["TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "TRY"]
+
+[tool.pyright]
+include = ["src", "tests", "evals"]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+reportPrivateUsage = "none"

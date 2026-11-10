@@ -1,0 +1,450 @@
+from __future__ import annotations
+
+import asyncio
+import re
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+import pytest
+import structlog.testing
+from pydantic import BaseModel
+
+from orion.channels.inbox import Inbound, OwnerInbox
+from orion.config import AgentConfig
+from orion.context.compiler import ContextCompiler
+from orion.core.events import Trust
+from orion.core.journal import SqliteJournal
+from orion.guardian.policy import ActionProposal, Approval, Guardian
+from orion.runtime import Orion
+from orion.tools.base import Effect, Reversibility, Tool, ToolContext, ToolRegistry, ToolResult
+from tests.fakes import ScriptedProvider, call_tools, reply
+from tests.test_runtime_cache import assert_prefix_stable
+
+
+class Outlet:
+    def __init__(self, name: str, up: bool = True) -> None:
+        self.name = name
+        self.up = up
+        self.sent: list[str] = []
+        self.quiet: list[bool] = []
+        self.shown: list[str] = []
+
+    async def available(self) -> bool:
+        return self.up
+
+    async def deliver(self, text: str, correlation_id: str | None, quiet: bool = False) -> None:
+        self.sent.append(text)
+        self.quiet.append(quiet)
+
+    @asynccontextmanager
+    async def working(self, item: Inbound) -> AsyncGenerator[None]:
+        self.shown.append(item.text)
+        yield
+
+
+async def until(condition: Callable[[], bool]) -> None:
+    async with asyncio.timeout(2):
+        while not condition():  # noqa: ASYNC110 - polling plain test fakes
+            await asyncio.sleep(0.01)
+
+
+@pytest.fixture
+def provider() -> ScriptedProvider:
+    return ScriptedProvider()
+
+
+@asynccontextmanager
+async def running(
+    journal: SqliteJournal, provider: ScriptedProvider, split: bool = False
+) -> AsyncGenerator[OwnerInbox]:
+    orion = Orion(
+        journal=journal,
+        provider=provider,
+        registry=ToolRegistry([]),
+        guardian=Guardian(),
+        compiler=ContextCompiler("C"),
+        agent=AgentConfig(),
+    )
+    inbox = OwnerInbox(orion, coalesce_seconds=0.05, split=split, beat_seconds=0.0)
+    worker = asyncio.create_task(inbox.run())
+    yield inbox
+    worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+
+@pytest.fixture
+async def inbox(journal: SqliteJournal, provider: ScriptedProvider) -> AsyncIterator[OwnerInbox]:
+    async with running(journal, provider) as inbox:
+        yield inbox
+
+
+async def test_bursts_coalesce_per_channel_and_answer_where_they_came_from(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    imessage, tui = Outlet("imessage"), Outlet("tui")
+    inbox.register(imessage)
+    inbox.register(tui)
+    provider.extend(reply("pour iMessage"), reply("pour la TUI"))
+    inbox.submit(Inbound("imessage", ("a",), "un"))
+    inbox.submit(Inbound("imessage", ("b",), "deux"))
+    inbox.submit(Inbound("tui", ("c",), "trois"))
+    await until(lambda: bool(tui.sent))
+    assert imessage.sent == ["pour iMessage"] and tui.sent == ["pour la TUI"]
+    assert provider.requests[0].messages[-1]["content"].endswith("un\ndeux")
+    assert re.search(r"· tui[] ·]", provider.requests[1].messages[-1]["content"])
+    assert imessage.shown == ["deux"]
+
+
+async def test_an_answer_is_one_message_even_with_an_old_split_marker(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    """`<suite/>` no longer splits a message (D214): imitated from past answers, it is a
+    paragraph break, never a second message nor shown as text."""
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(reply("Jeudi 18 h, c'est bon.<suite/>Tu y vas avec Inès ?"))
+    inbox.submit(Inbound("imessage", ("a",), "c'est quand ?"))
+    await until(lambda: len(imessage.sent) == 1)
+    assert imessage.sent == ["Jeudi 18 h, c'est bon.\n\nTu y vas avec Inès ?"]
+
+
+async def test_where_the_model_splits_two_things_go_as_two_messages(
+    journal: SqliteJournal, provider: ScriptedProvider
+) -> None:
+    """On the ChatGPT plan, `<suite/>` starts another message, typed again first (D230)."""
+    async with running(journal, provider, split=True) as inbox:
+        imessage = Outlet("imessage")
+        inbox.register(imessage)
+        provider.extend(reply("Jeudi 18 h, c'est bon.<suite/>Tu y vas avec Inès ?"))
+        inbox.submit(Inbound("imessage", ("a",), "c'est quand ?"))
+        await until(lambda: len(imessage.sent) == 2)
+        assert imessage.sent == ["Jeudi 18 h, c'est bon.", "Tu y vas avec Inès ?"]
+        assert imessage.shown == ["c'est quand ?", "c'est quand ?"]
+
+
+async def test_words_beside_a_tool_call_can_be_the_whole_answer(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    """« ok, noté » written with the call that notes it, then an empty reply: one message
+    (D216); a call whose result it read is asked once about it first (D226). An empty reply
+    with nothing said yet is sent back once instead of leaving him without an answer."""
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(call_tools(("note", {}), text="ok gros, c'est noté"), reply(""), reply(""))
+    inbox.submit(Inbound("imessage", ("a",), "appelle-moi gros"))
+    await until(lambda: len(provider.requests) == 3 and not inbox.owner_waiting())
+    provider.extend(call_tools(("note", {})), reply(""), reply("c'est fait"))
+    inbox.submit(Inbound("imessage", ("b",), "note ça"))
+    await until(lambda: len(imessage.sent) == 2)
+    assert imessage.sent == ["ok gros, c'est noté", "c'est fait"]
+
+
+async def test_call_transcripts_may_need_no_answer(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(reply("SILENCE"), reply("Jeudi alors, comme dit au tel."))
+    inbox.submit(
+        Inbound("appel", ("call-1",), "transcription…", reply_via="imessage", allow_silence=True)
+    )
+    inbox.submit(
+        Inbound("appel", ("call-2",), "transcription…", reply_via="imessage", allow_silence=True)
+    )
+    await until(lambda: bool(imessage.sent))
+    assert imessage.sent == ["Jeudi alors, comme dit au tel."]
+    assert len(provider.requests) == 2  # transcripts are never merged together
+
+
+async def test_silence_is_never_sent_as_a_word(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    """After a voice message, Orion has nothing to add: he must not read « SILENCE »."""
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(reply("SILENCE."), reply("Et voilà."))
+    inbox.submit(Inbound("imessage", ("a",), "envoie-moi un vocal"))
+    await until(lambda: len(provider.requests) == 1)
+    inbox.submit(Inbound("imessage", ("b",), "merci"))
+    await until(lambda: bool(imessage.sent))
+    assert imessage.sent == ["Et voilà."]
+
+
+async def test_proactive_messages_take_the_first_available_outlet(inbox: OwnerInbox) -> None:
+    imessage, tui = Outlet("imessage", up=False), Outlet("tui")
+    inbox.register(imessage)
+    inbox.register(tui)
+    await inbox.notify("coucou", "c1")
+    assert tui.sent == ["coucou"] and imessage.sent == []
+    tui.up = False
+    assert not await inbox.available()
+
+
+async def test_each_turn_logs_where_the_time_went(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(reply("ok"))
+    with structlog.testing.capture_logs() as logs:
+        inbox.submit(Inbound("imessage", ("a",), "salut"))
+        await until(lambda: bool(imessage.sent))
+        await until(lambda: any(e["event"] == "inbox.turn" for e in logs))
+    [turn] = [e for e in logs if e["event"] == "inbox.turn"]
+    assert turn["messages"] == 1 and turn["coalesce_s"] >= 0.05
+    assert {"think_s", "send_s", "cached_tokens", "cost_usd"} <= turn.keys()
+
+
+class _Wait(BaseModel):
+    pass
+
+
+async def test_a_message_sent_while_orion_works_joins_the_running_turn(
+    journal: SqliteJournal, provider: ScriptedProvider
+) -> None:
+    holder: list[OwnerInbox] = []
+
+    async def lookup(_args: object, _ctx: ToolContext) -> ToolResult:
+        # The owner writes again while the tool runs, then again on another channel.
+        holder[0].submit(Inbound("imessage", ("b",), "non laisse tomber"))
+        holder[0].submit(Inbound("tui", ("c",), "autre chose"))
+        return ToolResult("Tom : +33 6 00 00 00 00")
+
+    tool = Tool(
+        name="lookup",
+        description="Look someone up.",
+        input_model=_Wait,
+        handler=lookup,
+        effect=Effect.NONE,
+        reversibility=Reversibility.REVERSIBLE,
+    )
+    orion = Orion(
+        journal=journal,
+        provider=provider,
+        registry=ToolRegistry([tool]),
+        guardian=Guardian(),
+        compiler=ContextCompiler("C"),
+        agent=AgentConfig(),
+    )
+    inbox = OwnerInbox(orion, coalesce_seconds=0.05)
+    holder.append(inbox)
+    imessage, tui = Outlet("imessage"), Outlet("tui")
+    inbox.register(imessage)
+    inbox.register(tui)
+    provider.extend(
+        call_tools(("lookup", {})), reply("Ok, j'appelle pas Tom."), reply("Pour la TUI.")
+    )
+    worker = asyncio.create_task(inbox.run())
+    try:
+        inbox.submit(Inbound("imessage", ("a",), "appelle Tom"))
+        await until(lambda: bool(tui.sent))
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    # One turn for both iMessage texts, one answer; the TUI message got its own turn.
+    assert imessage.sent == ["Ok, j'appelle pas Tom."] and tui.sent == ["Pour la TUI."]
+    second = provider.requests[1].messages
+    assert second[-2]["role"] == "tool"
+    assert second[-1]["role"] == "user" and "non laisse tomber" in second[-1]["content"]
+    assert "autre chose" not in str(second)
+    received = [e for e in await journal.read() if e.kind == "message.received"]
+    assert [e.payload.get("refs") for e in received] == [["a"], ["b"], ["c"]]
+    assert received[1].payload["during_turn"] is True
+    assert received[1].correlation_id == received[0].correlation_id
+    assert_prefix_stable(provider)
+
+
+async def test_orion_can_say_a_word_before_it_has_finished(
+    journal: SqliteJournal, provider: ScriptedProvider
+) -> None:
+    """What Orion writes beside a tool call goes out at once, without ringing; the answer
+    follows, and rings (D169)."""
+    from orion.tools.builtin import builtin_tools
+
+    orion = Orion(
+        journal=journal,
+        provider=provider,
+        registry=ToolRegistry(builtin_tools()),
+        guardian=Guardian(),
+        compiler=ContextCompiler("C"),
+        agent=AgentConfig(),
+    )
+    inbox = OwnerInbox(orion, coalesce_seconds=0.01)
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(
+        call_tools(("plan", {"steps": [{"text": "regarder"}]}), text="Je regarde l'heure."),
+        call_tools(
+            ("plan", {"steps": [{"text": "répondre", "status": "done"}]})
+        ),  # nothing written beside it: nothing sent
+        reply("Il est 17h."),
+    )
+    worker = asyncio.create_task(inbox.run())
+    inbox.submit(Inbound("imessage", ("a",), "il est quelle heure ?"))
+    await until(lambda: len(imessage.sent) == 2)
+    worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+    assert imessage.sent == ["Je regarde l'heure.", "Il est 17h."]
+    assert imessage.quiet == [True, False]
+    # Sent once, kept once: the conversation replays it as the model wrote it.
+    assert_prefix_stable(provider)
+
+
+async def test_a_turn_that_may_stay_silent_says_nothing_midway(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(call_tools(("nope", {}), text="Hmm, voyons."), reply("SILENCE"))
+    inbox.submit(Inbound("appel", ("c",), "…", reply_via="imessage", allow_silence=True))
+    await until(lambda: len(provider.requests) == 2)
+    await asyncio.sleep(0.05)
+    assert imessage.sent == []
+
+
+class Empty(BaseModel):
+    pass
+
+
+async def nothing(_args: Any, _ctx: ToolContext) -> ToolResult:
+    return ToolResult("")
+
+
+class FileOutletFake(Outlet):
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.files: list[str] = []
+        self.asked: list[str] = []
+
+    async def deliver_file(self, path: Path, caption: str, correlation_id: str | None) -> None:
+        self.files.append(path.name)
+
+    async def approve(self, proposal: ActionProposal) -> Approval:
+        self.asked.append(proposal.tool.name)
+        return Approval(True)
+
+
+async def test_files_and_questions_go_where_he_last_wrote_from(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    """D88: one way out for everything, whatever the channel; a channel is just a module."""
+    imessage, telegram, tui = FileOutletFake("imessage"), FileOutletFake("telegram"), Outlet("tui")
+    for outlet in (tui, imessage, telegram):
+        inbox.register(outlet)
+    await inbox.deliver_file(Path("vocal.m4a"), "", None)
+    assert imessage.files == ["vocal.m4a"]  # the first that carries files: not the terminal
+    provider.extend(reply("ok"))
+    inbox.submit(Inbound("telegram", ("t",), "salut"))
+    await until(lambda: bool(telegram.sent))
+    await inbox.deliver_file(Path("image.png"), "", None)
+    note = Tool(name="note", description="n", input_model=Empty, handler=nothing)
+    assert await inbox.approve(ActionProposal(note, Empty(), Trust.WEB, "owner"))
+    assert telegram.files == ["image.png"] and telegram.asked == ["note"]
+    telegram.up = False  # gone: the next one up
+    await inbox.deliver_file(Path("b.pdf"), "", None)
+    assert imessage.files == ["vocal.m4a", "b.pdf"]
+
+
+async def test_a_turn_that_breaks_does_not_stop_the_next_one(
+    inbox: OwnerInbox, provider: ScriptedProvider
+) -> None:
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+
+    def broken(_request: Any) -> Any:
+        raise RuntimeError("a bug somewhere")
+
+    provider.extend(broken, reply("Me revoilà."))
+    with structlog.testing.capture_logs() as logs:
+        inbox.submit(Inbound("imessage", ("a",), "un"))
+        await until(lambda: bool(imessage.sent))
+    assert imessage.sent == ["(Je n'ai pas pu te répondre : une erreur de mon côté.)"]
+    assert any(e["event"] == "inbox.turn_failed" for e in logs)
+    inbox.submit(Inbound("imessage", ("b",), "deux"))
+    await until(lambda: len(imessage.sent) == 2)
+    assert imessage.sent[-1] == "Me revoilà."
+
+
+async def test_his_message_comes_before_what_orion_was_doing_on_its_own(
+    journal: SqliteJournal, provider: ScriptedProvider
+) -> None:
+    # 2026-10-31: « abandonne » waited 16 minutes behind a digest that went on tidying his mail.
+    holder: list[OwnerInbox] = []
+
+    async def tidy(_args: object, _ctx: ToolContext) -> ToolResult:
+        if not holder[0].owner_waiting():
+            holder[0].submit(Inbound("imessage", ("a",), "abandonne"))
+            await until(holder[0].owner_waiting)
+        return ToolResult("trié")
+
+    tool = Tool(
+        name="tidy",
+        description="Tidy his mail.",
+        input_model=_Wait,
+        handler=tidy,
+        effect=Effect.NONE,
+        reversibility=Reversibility.REVERSIBLE,
+    )
+    orion = Orion(
+        journal=journal,
+        provider=provider,
+        registry=ToolRegistry([tool]),
+        guardian=Guardian(),
+        compiler=ContextCompiler("C"),
+        agent=AgentConfig(),
+    )
+    inbox = OwnerInbox(orion, coalesce_seconds=0.3)
+    holder.append(inbox)
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(call_tools(("tidy", {})), call_tools(("tidy", {})), reply("ok, j'arrête."))
+    worker = asyncio.create_task(inbox.run())
+    try:
+        turn = await orion.handle_initiative("owner", "ton point de 19:00", "le point")
+        await until(lambda: bool(imessage.sent))
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    assert turn.reason.value == "halted"  # it gave way after the step under way
+    assert imessage.sent == ["ok, j'arrête."]
+
+
+async def test_an_answer_that_says_again_what_tell_sent_is_not_sent_twice(
+    journal: SqliteJournal, provider: ScriptedProvider
+) -> None:
+    from orion.tools.builtin import builtin_tools
+
+    orion = Orion(
+        journal=journal,
+        provider=provider,
+        registry=ToolRegistry(builtin_tools()),
+        guardian=Guardian(),
+        compiler=ContextCompiler("C"),
+        agent=AgentConfig(),
+    )
+    inbox = OwnerInbox(orion, coalesce_seconds=0.01)
+    imessage = Outlet("imessage")
+    inbox.register(imessage)
+    provider.extend(
+        call_tools(
+            ("tell", {"text": "WTI2 est bien l'ETF IA WTAI."}),
+            ("plan", {"steps": [{"text": "vérifier", "status": "done"}]}),
+        ),
+        reply("WTI2 est bien l'ETF IA WTAI !"),
+    )
+    worker = asyncio.create_task(inbox.run())
+    inbox.submit(Inbound("imessage", ("a",), "c'est quoi WTI2 ?"))
+    await until(lambda: len(provider.requests) == 2)
+    await asyncio.sleep(0.05)
+    worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+    assert imessage.sent == ["WTI2 est bien l'ETF IA WTAI."]
