@@ -1,8 +1,8 @@
 # Orion — notes for coding agents
 
 Orion is an always-on, proactive personal agent. Read `docs/architecture/04-architecture.md`
-before changing structure, and `docs/DECISIONS.md` for why things are the way they are. Docs are
-in French; code, identifiers and comments are in English.
+before changing structure, and `docs/DECISIONS.md` for why things are the way they are. The README is in English;
+other docs are in French; code, identifiers and comments are in English.
 
 ## Commands
 

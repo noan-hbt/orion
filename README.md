@@ -1,356 +1,356 @@
-<img src="docs/assets/banner.jpg" alt="Orion. Un agent personnel toujours allumé, qui vit sur ton serveur et n'agit qu'avec ton accord." width="100%">
+<img src="docs/assets/banner.jpg" alt="Orion. An always-on personal agent that lives on your server and only acts with your consent." width="100%">
 
 <p align="center">
-  <a href="#déployer-sur-un-serveur">[installer]</a>&nbsp;&nbsp;
-  <a href="#ce-quil-fait">[ce qu'il fait]</a>&nbsp;&nbsp;
-  <a href="#comment-cest-fait">[architecture]</a>&nbsp;&nbsp;
-  <a href="#écrire-un-module">[écrire un module]</a>&nbsp;&nbsp;
-  <a href="docs/DECISIONS.md">[décisions]</a>
+  <a href="#deploy-on-a-server">[install]</a>&nbsp;&nbsp;
+  <a href="#what-it-does">[what it does]</a>&nbsp;&nbsp;
+  <a href="#how-it-is-built">[architecture]</a>&nbsp;&nbsp;
+  <a href="#writing-a-module">[write a module]</a>&nbsp;&nbsp;
+  <a href="docs/DECISIONS.md">[decisions]</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-efe9da?labelColor=000000&logo=python&logoColor=efe9da">
-  <img alt="Auto-hébergé" src="https://img.shields.io/badge/auto--h%C3%A9berg%C3%A9-Debian%20%C2%B7%20Ubuntu-efe9da?labelColor=000000">
+  <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-Debian%20%C2%B7%20Ubuntu-efe9da?labelColor=000000">
   <img alt="Pyright strict" src="https://img.shields.io/badge/pyright-strict-efe9da?labelColor=000000">
   <img alt="Ruff" src="https://img.shields.io/badge/lint-ruff-efe9da?labelColor=000000">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-efe9da?labelColor=000000">
 </p>
 
-Orion est un agent personnel toujours actif. Il vit sur ton serveur, te parle depuis une app
-sur ton iPhone (ou par Telegram, iMessage, le téléphone), se souvient de ta vie, agit pour toi
-avec ton accord, et sait s'entendre avec les Orion d'autres personnes.
+Orion is an always-on personal agent. It lives on your server, talks to you from an app on your
+iPhone (or over Telegram, iMessage, the phone), remembers your life, acts for you with your
+consent, and gets along with other people's Orions.
 
-Il ne se contente pas de répondre : il garde tes engagements, te prévient avant ce qui compte,
-repense la nuit à ce qui est resté ouvert, poursuit des missions pendant des jours, et ne te
-parle en premier que quand ça vaut ton attention.
+It does more than answer: it keeps track of your commitments, warns you before what matters,
+thinks overnight about what was left open, pursues missions for days, and only speaks first
+when it is worth your attention.
 
 | | |
 |---|---|
-| 🧠 **Il se souvient** | Des faits datés et sourcés, jamais écrasés, relus chaque nuit. « Comment tu sais ça ? » a toujours une réponse. |
-| 🔭 **Il parle en premier, avec mesure** | Points du matin et du soir, alertes avant une échéance, relances. Au plus 12 fois par jour, chaque fois avec son « pourquoi maintenant ». |
-| 🛡️ **Rien ne sort sans ton oui** | Un gardien séparé détient les secrets et vérifie chaque effet sur le monde : mail, message, formulaire, commande. |
-| 🤝 **Il s'entend avec les autres Orion** | « Cale un déjeuner avec Tom » : les deux Orion se mettent d'accord, en ne partageant que tes créneaux libres. |
-| 🧩 **Il s'étend par modules** | Agenda, mail, navigateur, Home Assistant, missions… Le cœur reste petit ; le reste s'active dans `orion.toml`. |
+| 🧠 **It remembers** | Dated, sourced facts, never overwritten, reread every night. "How do you know that?" always has an answer. |
+| 🔭 **It speaks first, with restraint** | Morning and evening briefings, alerts before a deadline, follow-ups. At most 12 times a day, each time with its "why now". |
+| 🛡️ **Nothing leaves without your yes** | A separate guardian holds the secrets and checks every effect on the world: email, message, form, order. |
+| 🤝 **It gets along with other Orions** | "Set up lunch with Tom": both Orions agree on a time, sharing only your free slots. |
+| 🧩 **It grows through modules** | Calendar, mail, browser, Home Assistant, missions… The core stays small; the rest is switched on in `orion.toml`. |
 
-## Sommaire
+> **Language.** Orion talks to you in your language. Its design notes (`docs/DECISIONS.md`) and
+> some guides are still in French; the `Dxxx` references below point to them.
 
-- [À savoir avant d'installer](#à-savoir-avant-dinstaller)
-- [Ce qu'il fait](#ce-quil-fait)
-- [Déployer sur un serveur](#déployer-sur-un-serveur)
-- [L'utiliser](#lutiliser)
-- [Sauvegarder et restaurer](#sauvegarder-et-restaurer)
-- [Remettre à zéro, désinstaller](#remettre-à-zéro-désinstaller)
-- [Le tenir au quotidien](#le-tenir-au-quotidien)
-- [Sur ta machine, sans serveur](#sur-ta-machine-sans-serveur)
-- [Comment c'est fait](#comment-cest-fait)
-- [Développer](#développer)
+## Contents
+
+- [Before you install](#before-you-install)
+- [What it does](#what-it-does)
+- [Deploy on a server](#deploy-on-a-server)
+- [Using it](#using-it)
+- [Backup and restore](#backup-and-restore)
+- [Reset, uninstall](#reset-uninstall)
+- [Day-to-day running](#day-to-day-running)
+- [On your machine, without a server](#on-your-machine-without-a-server)
+- [How it is built](#how-it-is-built)
+- [Development](#development)
 - [Documentation](#documentation)
 
-## À savoir avant d'installer
+## Before you install
 
-- **Un Orion, un propriétaire.** Il est fait pour une personne, toi. D'autres personnes peuvent
-  lui écrire si tu le permets, avec ce que tu leur accordes ; leur propre assistant, c'est leur
-  Orion à elles, relié au tien (fédération).
-- **Il a la main sur son serveur.** Le cœur est root par `sudo` (D164) : chaque commande shell
-  t'est soumise avant de partir, mais donne-lui un serveur à lui, pas une machine qui fait autre
-  chose.
-- **Rien ne sort sans le gardien.** Un mail, un message à un tiers, un formulaire, une commande :
-  ton oui sur le texte exact, ou une autonomie que tu lui as accordée, bornée, et que tu retires
-  d'un mot (D35, D167). Il ne te parle en premier qu'au plus 12 fois par jour (D104).
-- **Ton serveur contient ta vie.** Le journal garde chaque conversation et tout ce qu'il a fait ;
-  le gardien garde tes secrets et tes mots de passe. Sauvegarde, chiffre, et efface pour de bon
-  si tu arrêtes : tout est décrit plus bas.
-- **Ce que ça coûte.** Un VPS (quelques euros par mois) et le modèle : une clé OpenRouter
-  (payée à l'usage, plafonnée par tour, `max_cost_usd_per_turn`), ou tes forfaits ChatGPT et
-  Claude, qui reprennent les rôles qu'ils peuvent (D62, D100, D147). iMessage et le téléphone
-  passent par une ligne Inkbox, payante ; Telegram et l'app sont gratuits.
-- **Les secrets ne vont jamais dans un fichier de config** ni dans la conversation : ils se
-  saisissent dans l'app et vont droit au gardien (`SecretRef`, D154).
+- **One Orion, one owner.** It is made for one person: you. Other people can write to it if you
+  allow it, with what you grant them; their own assistant is their own Orion, linked to yours
+  (federation).
+- **It runs its server.** The core is root through `sudo` (D164): every shell command is shown
+  to you before it runs, but give it a server of its own, not a machine that does something else.
+- **Nothing leaves without the guardian.** An email, a message to someone else, a form, an
+  order: your yes on the exact text, or an autonomy you granted, bounded, and that you take back
+  with one word (D35, D167). It speaks first at most 12 times a day (D104).
+- **Your server holds your life.** The journal keeps every conversation and everything it did;
+  the guardian keeps your secrets and passwords. Back up, encrypt, and erase for good if you
+  stop: everything is described below.
+- **What it costs.** A VPS (a few euros a month) and the model: an OpenRouter key (pay as you
+  go, capped per turn, `max_cost_usd_per_turn`), or your ChatGPT and Claude subscriptions, which
+  take over the roles they can (D62, D100, D147). iMessage and the phone go through an Inkbox
+  line, which is paid; Telegram and the app are free.
+- **Secrets never go in a config file** or in the conversation: they are typed in the app and
+  go straight to the guardian (`SecretRef`, D154).
 
-## Ce qu'il fait
+## What it does
 
-**Se souvenir.** Des faits datés et sourcés, jamais écrasés ; les engagements (je dois, on me
-doit) ; les situations qui durent (D149) ; les gens de ta vie et leurs liens. Recherche par le
-sens et par les mots. Chaque nuit, une passe relit toute la mémoire : doublons, contradictions,
-faits périmés (D174). « Comment tu sais ça ? » a toujours une réponse (D38). Oublier une source
-efface tout ce qui en vient.
+**Remember.** Dated, sourced facts, never overwritten; commitments (what I owe, what I am owed);
+ongoing situations (D149); the people in your life and how they relate. Search by meaning and by
+words. Every night, a pass rereads the whole memory: duplicates, contradictions, stale facts
+(D174). "How do you know that?" always has an answer (D38). Forgetting a source erases
+everything that came from it.
 
-**Parler en premier, avec mesure.** Points du matin et du soir, alerte avant une échéance,
-veille sur ta vie trois fois par jour (D150), relances quand quelqu'un ne répond pas (D129),
-rappels ponctuels, récurrents ou de lieu, heures calmes, concentration (« je bosse jusqu'à
-18 h »). Chaque prise de parole est une décision journalisée, avec son « pourquoi maintenant ».
+**Speak first, with restraint.** Morning and evening briefings, an alert before a deadline, a
+watch over your life three times a day (D150), follow-ups when someone does not answer (D129),
+one-off, recurring or location reminders, quiet hours, focus ("I'm working until 6 pm"). Every
+time it speaks up is a journaled decision, with its "why now".
 
-**Ta vie quotidienne.** Agendas (Google, iCloud, Outlook), mail (tri, brouillons dans ta voix,
-envoi, rangement), papiers (rangés, expiration, dossier de location en un PDF), photos et
-fichiers lus à l'arrivée (ce qui y est écrit n'est jamais un ordre), vocaux dans les deux sens,
-contacts, flux RSS, colis et abonnements, Home Assistant (D161), rendez-vous réservés pour toi
-(D73), la veille d'un départ (D77).
+**Your daily life.** Calendars (Google, iCloud, Outlook), mail (triage, drafts in your voice,
+sending, filing), paperwork (filed, expiry dates, a rental application in one PDF), photos and
+files read on arrival (what is written in them is never an order), voice notes both ways,
+contacts, RSS feeds, parcels and subscriptions, Home Assistant (D161), appointments booked for
+you (D73), the day before a trip (D77).
 
-**Penser et chercher.** Le web ; son propre navigateur, qu'il conduit seul et qu'il te passe
-quand une page a besoin de toi (D116) ; un modèle plus fort pour les questions dures (D46) ; des
-missions de plusieurs jours (D47) et des tâches de fond (D110) ; une bibliothèque de tes notes
-et de toute votre conversation (D48).
+**Think and search.** The web; its own browser, which it drives alone and hands over to you when
+a page needs you (D116); a stronger model for hard questions (D46); missions over several days
+(D47) and background tasks (D110); a library of your notes and of your whole conversation (D48).
 
-**Te connaître.** Il apprend ce que tu veux et ce que tu ignores, écrit comme toi quand il
-rédige pour quelqu'un (D68), ose te contredire une fois (D53, D66), relève ses erreurs et ses
-ratés (D69, D177), et tient la chronique de ta semaine (D52).
+**Know you.** It learns what you want and what you ignore, writes like you when it drafts for
+someone (D68), dares to disagree once (D53, D66), notes its own mistakes and misses (D69, D177),
+and keeps the chronicle of your week (D52).
 
-**Les autres Orion.** Relie ton Orion à celui de quelqu'un par une invitation ; « cale un
-déjeuner avec Tom » suffit, et seuls tes créneaux libres sont partagés (D29, D99, D102).
+**Other Orions.** Link your Orion to someone else's with an invitation; "set up lunch with Tom"
+is enough, and only your free slots are shared (D29, D99, D102).
 
-## Déployer sur un serveur
+## Deploy on a server
 
-C'est l'installation recommandée : Orion est fait pour tourner jour et nuit.
+This is the recommended setup: Orion is made to run day and night.
 
-**Il te faut** un VPS neuf sous Debian 12 ou Ubuntu 24.04 (OVH ou autre), un accès SSH, une clé [OpenRouter](https://openrouter.ai), et un iPhone pour l'app.
-Un nom de domaine est facultatif : sans lui, `<ip>.sslip.io` suffit pour le HTTPS.
+**You need** a fresh VPS running Debian 12 or Ubuntu 24.04 (OVH or any other), SSH access, an
+[OpenRouter](https://openrouter.ai) key, and an iPhone for the app. A domain name is optional:
+without one, `<ip>.sslip.io` is enough for HTTPS.
 
-1. **Domaine (facultatif).** Crée un enregistrement A vers l'IP du VPS (chez OVH : Web Cloud >
-   Domaines > Zone DNS).
-2. **Installer**, en SSH sur le VPS :
+1. **Domain (optional).** Create an A record pointing to the VPS IP (at OVH: Web Cloud >
+   Domains > DNS zone).
+2. **Install**, over SSH on the VPS:
 
    ```bash
    git clone https://github.com/noan-hbt/orion.git && cd orion
-   sudo deploy/install.sh orion.mondomaine.fr     # ou sans argument : <ip>.sslip.io
+   sudo deploy/install.sh orion.example.com     # or with no argument: <ip>.sslip.io
    ```
 
-   Le script installe tout (Caddy pour le HTTPS, Python, ffmpeg, le navigateur d'Orion, deux
-   utilisateurs, les services, le pare-feu), puis pose quatre questions : ton prénom et ton
-   fuseau, garder les secrets à part (oui), la clé OpenRouter (vérifiée tout de suite), et
-   Telegram en option (un bot créé avec @BotFather).
-3. **Appairer l'app.** À la fin, le script affiche un lien et un code. Ouvre le lien dans Safari,
-   Partager > « Sur l'écran d'accueil », ouvre Orion depuis l'écran d'accueil, saisis le code
-   (valable 10 minutes) et crée la passkey.
-4. **Le forfait Claude (facultatif)** se connecte sur le serveur, une fois :
+   The script installs everything (Caddy for HTTPS, Python, ffmpeg, Orion's browser, two users,
+   the services, the firewall), then asks four questions: your first name and time zone, keeping
+   secrets apart (yes), the OpenRouter key (checked right away), and Telegram as an option (a
+   bot created with @BotFather).
+3. **Pair the app.** At the end, the script prints a link and a code. Open the link in Safari,
+   Share > "Add to Home Screen", open Orion from the home screen, type the code (valid for 10
+   minutes) and create the passkey.
+4. **The Claude subscription (optional)** is connected on the server, once:
    `sudo orion claude login` (D100, D208).
 
-Ensuite, **plus rien ne se fait en SSH** (D154) : réglages, secrets, modules, forfaits,
-téléphones, machines et autres Orion se gèrent dans l'app, et ce qui compte se signe avec
-Face ID. Orion se met à jour seul. Relancer `install.sh` met le code à jour sans toucher à la
-configuration ni aux secrets.
+After that, **nothing is done over SSH anymore** (D154): settings, secrets, modules,
+subscriptions, phones, machines and other Orions are managed in the app, and what matters is
+signed with Face ID. Orion updates itself. Running `install.sh` again updates the code without
+touching the configuration or the secrets.
 
-Tous les détails (iMessage par Inkbox, rappels de lieu, coffre des mots de passe, ports) :
-[`deploy/README.md`](deploy/README.md).
+All the details (iMessage through Inkbox, location reminders, password vault, ports):
+[`deploy/README.md`](deploy/README.md) (in French).
 
-## L'utiliser
+## Using it
 
-**Lui parler.** L'app est le canal principal : la conversation, tes accords signés par Face ID,
-les notifications, le travail en cours (avec Stop) et tous les réglages. Telegram, iMessage et le
-téléphone (Inkbox, D40) marchent aussi.
+**Talk to it.** The app is the main channel: the conversation, your approvals signed with Face
+ID, notifications, the work in progress (with Stop) and every setting. Telegram, iMessage and the
+phone (Inkbox, D40) work too.
 
-**Le régler en lui parlant.** « Active le mail », « mets tes points à 9 h », « ajoute Angèle,
-elle peut savoir quand je suis libre » : il change ses réglages lui-même (`orion.toml`), avec
-ton oui sur le changement exact (D92). Ce qui te protège (le gardien, les canaux, qui peut lui
-écrire, le budget) ne change qu'avec ce oui, vérifié par le gardien.
+**Configure it by talking.** "Turn on mail", "move your briefings to 9 am", "add Angèle, she can
+know when I'm free": it changes its own settings (`orion.toml`), with your yes on the exact change
+(D92). What protects you (the guardian, the channels, who can write to it, the budget) only
+changes with that yes, checked by the guardian.
 
-**Connecter tes comptes**, dans l'app ou en lui demandant :
+**Connect your accounts**, in the app or by asking it:
 
-- **Agenda** : l'adresse iCal secrète de chaque agenda (Google : « Adresse secrète au format
-  iCal » ; iCloud : lien `webcal://` ; Outlook : « Publier un calendrier »), et tes adresses dans
-  `owner_emails`, sinon tes événements passent pour des invitations.
-- **Mail** : un mot de passe d'application par boîte (Gmail, iCloud…, en IMAP). Outlook.com
-  (OAuth) n'est pas pris en charge.
-- **Forfait ChatGPT** : Réglages > ChatGPT.
-- **Sites** : quand une page a besoin de toi (connexion, code SMS, captcha), il te passe son
-  navigateur dans l'app ; ses connexions restent. Le gardien peut aussi garder tes identifiants
-  (Réglages > Mots de passe, ou l'import d'un export KeePass, Bitwarden, Chrome…, D111).
-- **Tes machines** : Réglages > Machines donne la commande à lancer sur ton Mac ou ton PC
-  (`orion hand pair …`), pour qu'il lise les dossiers que tu partages (D41).
+- **Calendar**: the secret iCal address of each calendar (Google: "Secret address in iCal
+  format"; iCloud: `webcal://` link; Outlook: "Publish a calendar"), and your addresses in
+  `owner_emails`, otherwise your own events look like invitations.
+- **Mail**: an app password per mailbox (Gmail, iCloud…, over IMAP). Outlook.com (OAuth) is not
+  supported.
+- **ChatGPT subscription**: Settings > ChatGPT.
+- **Websites**: when a page needs you (sign-in, SMS code, captcha), it hands you its browser in
+  the app; its sessions persist. The guardian can also keep your credentials (Settings >
+  Passwords, or import a KeePass, Bitwarden, Chrome… export, D111).
+- **Your machines**: Settings > Machines gives the command to run on your Mac or PC
+  (`orion hand pair …`), so it can read the folders you share (D41).
 
-**Ce qu'il peut faire seul.** Par défaut, il demande avant d'agir sur le monde. Pour lui
-confier un domaine (envoyer des mails à certains destinataires, remplir des formulaires sur
-certains sites), accorde-lui une autonomie quand il la propose ; tu la retires d'un mot.
+**What it may do alone.** By default, it asks before acting on the world. To hand it a domain
+(sending mail to some recipients, filling forms on some sites), grant it an autonomy when it
+offers one; you take it back with one word.
 
-**Sur le serveur**, pour regarder ce qu'il fait. `sudo orion …` lance la commande sous
-l'utilisateur du gardien, avec ses secrets ; `--core` sous celui du cœur, qui tient le journal
-(`doctor`, `memory` et `chat` y vont d'office) :
+**On the server**, to see what it does. `sudo orion …` runs the command as the guardian's user,
+with its secrets; `--core` as the core's user, which holds the journal (`doctor`, `memory` and
+`chat` go there automatically):
 
 ```bash
-sudo orion doctor                        # configuration, stockage, état de chaque module
-sudo orion --core simulate --days 7      # ce qu'il enverrait cette semaine, sans rien envoyer
-sudo orion --core week                   # tours interrompus, erreurs d'outils, corrections, coût
-sudo orion --core initiative             # ce qu'il a appris de tes retours, source par source
-sudo orion --core misses                 # ses ratés : tes 👎 et tes corrections
+sudo orion doctor                        # configuration, storage, state of each module
+sudo orion --core simulate --days 7      # what it would send this week, without sending anything
+sudo orion --core week                   # interrupted turns, tool errors, corrections, cost
+sudo orion --core initiative             # what it learned from your feedback, source by source
+sudo orion --core misses                 # its misses: your 👎 and your corrections
 ```
 
-## Sauvegarder et restaurer
+## Backup and restore
 
-**Chaque nuit, tout seul**, vers 4 h 15 : une copie vérifiée du journal du cœur et du registre
-du gardien va dans `/srv/orion/backups/` (30 copies gardées). La mémoire, les personnes, les
-rappels se reconstruisent à partir du journal. Ces copies ne gardent **que les journaux**, et
-restent sur le serveur.
+**Every night, on its own**, around 4:15 am: a verified copy of the core's journal and of the
+guardian's ledger goes to `/srv/orion/backups/` (30 copies kept). Memory, people and reminders
+are rebuilt from the journal. These copies hold **only the journals**, and stay on the server.
 
-**Une sauvegarde complète**, à lancer toi-même (D290) : réglages, secrets, connexions aux
-forfaits, coffre des mots de passe, modules, fichiers, photos, navigateur et ses sites
-connectés.
+**A full backup**, run it yourself (D290): settings, secrets, subscription sessions, password
+vault, modules, files, photos, the browser and its signed-in sites.
 
 ```bash
 sudo /srv/orion/app/deploy/backup.sh
 ```
 
-Il demande s'il faut sauvegarder ou restaurer, où ranger l'archive (`/root` par défaut) et
-comment la chiffrer : une phrase de passe (age ou gpg), une clé publique age, ou rien. Orion
-est arrêté quelques secondes le temps de la copie, et les journaux sont vérifiés avant que la
-copie compte. **Copie ensuite l'archive hors du serveur**, par exemple :
+It asks whether to back up or restore, where to put the archive (`/root` by default) and how to
+encrypt it: a passphrase (age or gpg), an age public key, or nothing. Orion stops for a few
+seconds during the copy, and the journals are verified before the copy counts. **Then copy the
+archive off the server**, for example:
 
 ```bash
 rclone copy /root/orion-full-<date>.tar.gz.age ovh:orion-backups
 ```
 
-Sans questions, pour un timer à toi :
+Without questions, for a timer of your own:
 
 ```bash
-sudo /srv/orion/app/deploy/backup.sh backup --encrypt age:<clé publique> --yes
+sudo /srv/orion/app/deploy/backup.sh backup --encrypt age:<public key> --yes
 ```
 
-**Restaurer**, sur le même serveur ou un neuf : lance d'abord `install.sh` sur un serveur neuf
-(avec le même domaine, sinon il faudra réappairer l'app), puis
+**Restore**, on the same server or a new one: on a new server, run `install.sh` first (with the
+same domain, otherwise you will need to pair the app again), then
 
 ```bash
-sudo /srv/orion/app/deploy/backup.sh restore     # propose les archives de /root
+sudo /srv/orion/app/deploy/backup.sh restore     # offers the archives in /root
 ```
 
-L'archive est déchiffrée et vérifiée avant qu'Orion soit arrêté ; ce qui était là est gardé à
-part (`/root/orion-before-restore-<date>.tar.gz`), et se restaure de la même façon. Si ChatGPT
-ne répond plus ensuite, reconnecte-toi dans l'app : sa connexion change à chaque
-rafraîchissement.
+The archive is decrypted and verified before Orion is stopped; what was there is kept aside
+(`/root/orion-before-restore-<date>.tar.gz`), and restores the same way. If ChatGPT stops
+answering afterwards, sign in again in the app: its session changes on every refresh.
 
-Pour remettre seulement le journal d'une nuit : arrête les deux services, copie
-`journal.sqlite3` de `/srv/orion/backups/core/<date>/` dans `/srv/orion/data/`, supprime
-`memory.sqlite3` (reconstruit au démarrage), redémarre.
+To restore only one night's journal: stop both services, copy `journal.sqlite3` from
+`/srv/orion/backups/core/<date>/` into `/srv/orion/data/`, delete `memory.sqlite3` (rebuilt at
+startup), restart.
 
-## Remettre à zéro, désinstaller
+## Reset, uninstall
 
-**Remise à zéro** : Orion oublie tout ce qu'il a vécu (conversations, mémoire, rappels,
-missions, fichiers, navigateur), mais garde ses réglages, ses secrets, ses modules et tes
-connexions aux forfaits.
+**Reset**: Orion forgets everything it lived through (conversations, memory, reminders,
+missions, files, browser), but keeps its settings, secrets, modules and your subscription
+sessions.
 
 ```bash
-sudo /srv/orion/app/deploy/reset.sh               # le gardien et les sauvegardes restent
-sudo /srv/orion/app/deploy/reset.sh --guardian    # ... le gardien oublie aussi (accords, mots de passe)
-sudo /srv/orion/app/deploy/reset.sh --backups     # ... et les sauvegardes de la nuit
+sudo /srv/orion/app/deploy/reset.sh               # the guardian and the backups stay
+sudo /srv/orion/app/deploy/reset.sh --guardian    # ... the guardian forgets too (approvals, passwords)
+sudo /srv/orion/app/deploy/reset.sh --backups     # ... and the nightly backups
 ```
 
-Une copie de ce qui part est gardée d'abord dans `/root/orion-reset-<date>.tar.gz`
-(`--no-archive` pour n'en garder aucune).
+A copy of what goes is kept first in `/root/orion-reset-<date>.tar.gz` (`--no-archive` to keep
+none).
 
-**Désinstaller** : retire tout ce que `install.sh` a posé (services, code, Python, navigateur,
-données, secrets, règle sudo, utilisateurs, site Caddy).
+**Uninstall**: removes everything `install.sh` set up (services, code, Python, browser, data,
+secrets, sudo rule, users, Caddy site).
 
 ```bash
-sudo /srv/orion/app/deploy/uninstall.sh            # garde une archive dans /root
-sudo /srv/orion/app/deploy/uninstall.sh --purge    # rien n'est gardé
+sudo /srv/orion/app/deploy/uninstall.sh            # keeps an archive in /root
+sudo /srv/orion/app/deploy/uninstall.sh --purge    # nothing is kept
 ```
 
-Sans `--purge`, données, configuration et secrets vont d'abord dans `/root/orion-<date>.tar.gz`.
-Pour revenir plus tard : `install.sh`, puis `backup.sh restore` sur cette archive. Pour tout
-effacer pour de bon, supprime aussi les archives de `/root` et celles que tu as copiées
-ailleurs : elles contiennent ta vie avec Orion et tes mots de passe. Restent en place Caddy,
-uv, ffmpeg, sqlite3 et les règles du pare-feu.
+Without `--purge`, data, configuration and secrets go first to `/root/orion-<date>.tar.gz`. To
+come back later: `install.sh`, then `backup.sh restore` on that archive. To erase everything for
+good, also delete the archives in `/root` and those you copied elsewhere: they hold your life
+with Orion and your passwords. Caddy, uv, ffmpeg, sqlite3 and the firewall rules stay in place.
 
-## Le tenir au quotidien
+## Day-to-day running
 
-- **Mises à jour** : automatiques (D94). Toutes les 2 minutes, il regarde si sa branche a du
-  nouveau, installe, vérifie, et revient à la version d'avant si quelque chose casse. Jamais
-  pendant que tu t'en sers, au plus une par heure (D251). Pour ne pas attendre : Réglages >
-  Version > Appliquer maintenant.
-- **S'il tombe** : systemd le relance ; s'il reste muet plus de 5 minutes, le gardien te
-  prévient lui-même, dans l'app ou par Telegram.
-- **Logs** : `journalctl -u orion-core -f` et `journalctl -u orion-guardian -f`.
-- **Après un changement d'IP ou de domaine** : la passkey est liée au nom du serveur ; relance
-  `install.sh` avec le nouveau nom, il affiche un code pour réappairer.
+- **Updates**: automatic (D94). Every 2 minutes, it checks whether its branch has something new,
+  installs it, checks it, and rolls back if something breaks. Never while you are using it, at
+  most once an hour (D251). To skip the wait: Settings > Version > Apply now.
+- **If it goes down**: systemd restarts it; if it stays silent for more than 5 minutes, the
+  guardian warns you itself, in the app or over Telegram.
+- **Logs**: `journalctl -u orion-core -f` and `journalctl -u orion-guardian -f`.
+- **After an IP or domain change**: the passkey is tied to the server name; run `install.sh`
+  again with the new name, it prints a code to pair again.
 
-## Sur ta machine, sans serveur
+## On your machine, without a server
 
-Pour l'essayer ou le développer, il suffit de [uv](https://docs.astral.sh/uv/) :
+To try it or work on it, all you need is [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv tool install --editable .   # une fois, depuis le dépôt : `orion` marche ensuite partout
-orion setup     # prénom, fuseau, clé OpenRouter, Telegram en option
-orion chat      # lui parler dans ce terminal
-orion serve     # le démon (avec `orion guardian` à côté si le gardien est séparé)
+uv tool install --editable .   # once, from the repo: `orion` then works everywhere
+orion setup     # first name, time zone, OpenRouter key, Telegram as an option
+orion chat      # talk to it in this terminal
+orion serve     # the daemon (with `orion guardian` next to it if the guardian is separate)
 ```
 
-`orion setup` écrit `~/.orion/orion.toml`, et les secrets dans `core.env` et `guardian.env` à
-côté. Un `orion.toml` dans le dossier courant passe avant ; `ORION_HOME` ou `ORION_CONFIG`
-changent l'emplacement (D180). Toutes les options sont décrites dans
-[`orion.example.toml`](orion.example.toml). Sans serveur, pas d'app sur l'iPhone ni de
-sauvegardes de nuit : `orion backup <dossier>` copie le journal à la demande.
+`orion setup` writes `~/.orion/orion.toml`, and the secrets in `core.env` and `guardian.env`
+next to it. An `orion.toml` in the current folder takes precedence; `ORION_HOME` or
+`ORION_CONFIG` change the location (D180). Every option is described in
+[`orion.example.toml`](orion.example.toml). Without a server, there is no iPhone app and no
+nightly backups: `orion backup <folder>` copies the journal on demand.
 
-## Comment c'est fait
+## How it is built
 
-- **Un journal append-only** (SQLite) est la seule vérité. Le reste (mémoire, personnes,
-  rappels, missions…) est une projection qui se reconstruit à partir de lui. Chaque contenu porte
-  sa provenance et son niveau de confiance.
-- **Deux processus** (D28) : `orion guardian` détient les secrets et les canaux, sert l'app et
-  vérifie chaque effet sur le monde ; `orion serve`, le cœur, pense. Sur un serveur, ils tournent
-  sous deux utilisateurs (`orion-guardian`, `orion-core`), derrière Caddy.
-- **Une plaque et des modules** (D24) : le cœur garde le journal, la mémoire, le gardien, la
-  boîte de réception, l'initiative et les rappels ; tout le reste est un module qu'on active dans
-  `orion.toml` (voir [`docs/REFERENCE.md`](docs/REFERENCE.md)).
-- **Les modèles** : par OpenRouter, un modèle principal, un pour le travail de fond, un plus
-  fort pour les questions dures et la nuit, un vérificateur d'une autre famille, un pour la
-  vision ; ou tes forfaits ChatGPT (`chatgpt:<modèle>`) et Claude (`claude-code:<modèle>`).
-  Tout se règle dans `[agent]`.
-- **Sur le serveur** : le code dans `/srv/orion/app`, les réglages dans
-  `/srv/orion/config/orion.toml`, les données dans `/srv/orion/data`, le gardien dans
-  `/srv/orion/guardian`, les secrets dans `/etc/orion`, les sauvegardes dans
-  `/srv/orion/backups`.
+- **An append-only journal** (SQLite) is the only source of truth. Everything else (memory,
+  people, reminders, missions…) is a projection rebuilt from it. Every piece of content carries
+  its provenance and its trust level.
+- **Two processes** (D28): `orion guardian` holds the secrets and the channels, serves the app
+  and checks every effect on the world; `orion serve`, the core, thinks. On a server, they run as
+  two users (`orion-guardian`, `orion-core`), behind Caddy.
+- **A plate and modules** (D24): the core keeps the journal, memory, guardian, inbox, initiative
+  and reminders; everything else is a module switched on in `orion.toml` (see
+  [`docs/REFERENCE.md`](docs/REFERENCE.md)).
+- **Models**: through OpenRouter, a main model, one for background work, a stronger one for hard
+  questions and the night, a verifier from another family, one for vision; or your ChatGPT
+  (`chatgpt:<model>`) and Claude (`claude-code:<model>`) subscriptions. All set in `[agent]`.
+- **On the server**: the code in `/srv/orion/app`, the settings in
+  `/srv/orion/config/orion.toml`, the data in `/srv/orion/data`, the guardian in
+  `/srv/orion/guardian`, the secrets in `/etc/orion`, the backups in `/srv/orion/backups`.
 
-## Développer
+## Development
 
 ```bash
 uv sync
-uv run pytest -q tests/test_x.py                   # seulement les fichiers touchés
+uv run pytest -q tests/test_x.py                   # only the files you touched
 uv run ruff format . && uv run ruff check .
-uv run pyright --pythonplatform Linux              # strict, 0 erreur
-uv run python -m evals                             # évaluations sur le vrai modèle (quelques centimes)
+uv run pyright --pythonplatform Linux              # strict, 0 errors
+uv run python -m evals                             # evaluations on the real model (a few cents)
 ```
 
-Les règles du dépôt (journal append-only, fail closed, `SecretRef`, contrat du cache de prompt,
-tests sur le comportement) sont dans [`CLAUDE.md`](CLAUDE.md). Pas d'éval sur le compte ChatGPT
-du cœur pour l'instant : les deux processus renouvelleraient ses jetons sans verrou.
+The repository rules (append-only journal, fail closed, `SecretRef`, prompt-cache contract,
+behavioural tests) are in [`CLAUDE.md`](CLAUDE.md). No evals on the core's ChatGPT account for
+now: both processes would refresh its tokens without a lock.
 
-### Écrire un module
+### Writing a module
 
-Un module est une sous-classe de `orion.modules.base.Module`. Chaque crochet est facultatif :
+A module is a subclass of `orion.modules.base.Module`. Every hook is optional:
 
 ```python
 from orion.modules.base import Daemon, Module, ModuleSettings, Plate
 
 
-class WeatherSettings(ModuleSettings):  # section [modules.weather] d'orion.toml
+class WeatherSettings(ModuleSettings):  # [modules.weather] section of orion.toml
     city: str = "Paris"
 
 
 class Weather(Module):
     name = "weather"
     settings_model = WeatherSettings
-    requires = ()  # autres modules nécessaires
+    requires = ()  # other modules it needs
 
-    def instructions_text(self) -> str:  # ajouté à la constitution
-        return "# La météo\n\nTu connais la météo avec `weather`."
+    def instructions_text(self) -> str:  # appended to the constitution
+        return "# Weather\n\nYou know the weather through `weather`."
 
     async def assemble(self, plate: Plate) -> list[Tool]:
-        return [...]  # outils donnés au modèle
+        return [...]  # tools given to the model
 
     async def serve(self, daemon: Daemon) -> None:
-        daemon.add_service("weather.watch", self.watch)  # service supervisé
-        daemon.reports.append(self)  # comptes rendus pour l'initiative
+        daemon.add_service("weather.watch", self.watch)  # supervised service
+        daemon.reports.append(self)  # reports for the initiative engine
 ```
 
-On le publie comme paquet avec un point d'entrée dans le groupe `orion.modules`
-(`weather = "mon_paquet:Weather"`), puis on l'active avec `[modules.weather] enabled = true`. Ou
-on l'ajoute au [catalogue](catalog/README.md) : Orion l'installe alors sur ton oui (D105).
+Publish it as a package with an entry point in the `orion.modules` group
+(`weather = "my_package:Weather"`), then switch it on with `[modules.weather] enabled = true`. Or
+add it to the [catalog](catalog/README.md): Orion then installs it on your yes (D105).
 
 ## Documentation
 
-- [`deploy/README.md`](deploy/README.md) — installer et tenir Orion sur un serveur, en détail
-- [`docs/REFERENCE.md`](docs/REFERENCE.md) — les modules, les commandes, la configuration
-- [`orion.example.toml`](orion.example.toml) — chaque option, commentée
-- [`docs/architecture/04-architecture.md`](docs/architecture/04-architecture.md) — architecture
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — journal des décisions : la raison de chaque choix
-  (les `Dxxx` de ce README)
-- [`docs/PASSATION.md`](docs/PASSATION.md) — où en est le travail, pour qui le reprend
-- [`docs/research/`](docs/research/) — études : Claude Code, paysage des agents, ce qui fait un
-  Jarvis, l'application
-- [`catalog/`](catalog/README.md) — skills, serveurs MCP et modules que tout Orion peut installer
+- [`deploy/README.md`](deploy/README.md): installing and running Orion on a server, in detail
+- [`docs/REFERENCE.md`](docs/REFERENCE.md): modules, commands, configuration
+- [`orion.example.toml`](orion.example.toml): every option, commented
+- [`docs/architecture/04-architecture.md`](docs/architecture/04-architecture.md): architecture
+- [`docs/DECISIONS.md`](docs/DECISIONS.md): the decision log, the reason behind each choice
+  (the `Dxxx` in this README)
+- [`docs/PASSATION.md`](docs/PASSATION.md): where the work stands, for whoever picks it up
+- [`docs/research/`](docs/research/): studies on Claude Code, the agent landscape, what makes a
+  Jarvis, the app
+- [`catalog/`](catalog/README.md): skills, MCP servers and modules any Orion can install
+
+## License
+
+[MIT](LICENSE)

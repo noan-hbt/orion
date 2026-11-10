@@ -1,30 +1,28 @@
-# Le catalogue public d'Orion
+# Orion's public catalog
 
-Chaque Orion peut piocher ici (`skill` → catalog, puis install). Il arrive avec chaque mise à
-jour. Pour ajouter quelque chose, ouvre une pull request :
+Every Orion can pick from here (`skill` → catalog, then install). It ships with every update. To
+add something, open a pull request:
 
-- `skills/<nom>.md` : un savoir-faire en texte, avec un en-tête :
+- `skills/<name>.md`: a piece of know-how as text, with a header:
 
   ```
   ---
-  name: <nom>
-  description: <quand s'en servir, une ligne>
+  name: <name>
+  description: <when to use it, one line>
   ---
-  <le savoir-faire>
+  <the know-how>
   ```
 
-- `mcp/<nom>.toml` : un serveur MCP, avec `name`, `description`, `url` (ou rien d'autre : les
-  serveurs lancés par commande se règlent sur le serveur), `read_only` (ses outils qui ne font
-  que lire) et `secret` (le nom de la variable de son jeton, saisi par le formulaire du
-  gardien).
+- `mcp/<name>.toml`: an MCP server, with `name`, `description`, `url` (or nothing else: servers
+  started by a command are set up on the server), `read_only` (its tools that only read) and
+  `secret` (the name of the variable holding its token, entered through the guardian's form).
 
-- `modules/<nom>.toml` : un module natif (D105), du code Python qui tourne dans Orion avec ses
-  accès, la mémoire du propriétaire comprise. `name`, `description`, `source` (une seule
-  version exacte : `path:<dossier de ce dépôt>`, `<paquet>==<version>` ou
-  `git+https://…@<commit complet>`), `accesses` (ce qu'il atteint, dit au propriétaire avant
-  qu'il accepte) et `settings` (ce qu'il faut régler avant de l'allumer). Un exemple :
-  `examples/modules/orion-des`. Orion l'installe avec `module_install`, sur le oui du
-  propriétaire ; sur le serveur : `orion-admin --core modules install <nom>`.
+- `modules/<name>.toml`: a native module (D105), Python code that runs inside Orion with its
+  access, the owner's memory included. `name`, `description`, `source` (one exact version only:
+  `path:<folder in this repo>`, `<package>==<version>` or `git+https://…@<full commit>`),
+  `accesses` (what it reaches, told to the owner before they accept) and `settings` (what must be
+  set before switching it on). An example: `examples/modules/orion-des`. Orion installs it with
+  `module_install`, on the owner's yes; on the server: `orion-admin --core modules install <name>`.
 
-Une skill ne donne jamais d'ordre à Orion contre son propriétaire : elle explique comment faire
-une chose qu'il demande.
+A skill never gives Orion an order against its owner: it explains how to do something the owner
+asks for.
