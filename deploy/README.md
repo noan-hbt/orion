@@ -1,265 +1,259 @@
-# Déployer Orion sur un serveur (VPS OVH ou autre)
+# Deploying Orion on a server (OVH VPS or other)
 
-Orion tourne en deux processus (D28), sous deux utilisateurs Unix qui partagent un groupe :
+> Orion's app screens are in French. Screen and button names below are translated.
 
-- `orion-guardian` détient les secrets (Inkbox, Telegram, agendas, mail, recherche web, clé de
-  fédération, coffre des identifiants), sert l'app et vérifie chaque effet sur le monde ;
-- `orion-core` ne détient que la clé du modèle (OpenRouter). Il est root par `sudo`
-  (`/etc/sudoers.d/orion-core`, D164), mais chaque commande shell t'est soumise (D96).
+Orion runs as two processes (D28), under two Unix users that share a group:
 
-Caddy, devant eux, sert le HTTPS et ne laisse passer que les chemins d'Orion : l'app
-(`/app/`), la console (`/console/`), le formulaire des secrets (`/secrets/`), les machines
-(`/hands/`), les lieux (`/places/`), les hooks (`/hooks/in/`), le téléphone (`/voice/live`), le
-webhook Inkbox et la fédération. Tout le reste répond 404. La table des ports est dans
-[`docs/REFERENCE.md`](../docs/REFERENCE.md#les-ports).
+- `orion-guardian` holds the secrets (Inkbox, Telegram, calendars, mail, web search,
+  federation key, credential vault), serves the app and checks every effect on the world;
+- `orion-core` holds only the model key (OpenRouter). It is root through `sudo`
+  (`/etc/sudoers.d/orion-core`, D164), but every shell command is submitted to you (D96).
+
+Caddy, in front of them, serves HTTPS and only lets Orion's paths through: the app (`/app/`),
+the console (`/console/`), the secrets form (`/secrets/`), the machines (`/hands/`), places
+(`/places/`), hooks (`/hooks/in/`), the phone (`/voice/live`), the Inkbox webhook and
+federation. Everything else answers 404. The port table is in
+[`docs/REFERENCE.md`](../docs/REFERENCE.md#ports).
 
 ## Installation
 
-Sur un VPS neuf sous Debian 12 ou Ubuntu 24.04, connecté en SSH :
+On a fresh VPS running Debian 12 or Ubuntu 24.04, logged in over SSH:
 
 ```bash
 git clone https://github.com/noan-hbt/orion.git && cd orion
-sudo deploy/install.sh orion.mondomaine.fr     # ou sans argument : <ip>.sslip.io
+sudo deploy/install.sh orion.mydomain.com     # or with no argument: <ip>.sslip.io
 ```
 
-Pour un nom de domaine à toi, crée d'abord un enregistrement A vers l'IP du VPS (dans OVH :
-Web Cloud > Domaines > Zone DNS). Sans domaine, le script utilise `sslip.io`, qui suffit
-pour obtenir un certificat.
+For your own domain name, first create an A record pointing to the VPS IP (in OVH: Web Cloud >
+Domains > DNS zone). Without a domain, the script uses `sslip.io`, which is enough to get a
+certificate.
 
-Le script installe tout (Caddy, uv, Python, ffmpeg, le navigateur d'Orion, les utilisateurs,
-les services, le pare-feu), puis pose quelques questions (`orion setup --server`) :
+The script installs everything (Caddy, uv, Python, ffmpeg, Orion's browser, the users, the
+services, the firewall), then asks a few questions (`orion setup --server`):
 
-1. ton prénom et ton fuseau horaire ;
-2. garder les secrets dans un processus à part (oui par défaut sur un serveur) ;
-3. la clé OpenRouter (vérifiée tout de suite) ;
-4. Telegram, en option : crée un bot avec @BotFather (`/newbot`) et colle son jeton (vérifié),
-   puis écris au bot depuis ton téléphone : Orion lit ton id dans ce message, tu n'as rien à
-   recopier. Le bot te répond pour confirmer. Sans Telegram, l'app suffit.
+1. your first name and time zone;
+2. whether to keep the secrets in a separate process (yes by default on a server);
+3. the OpenRouter key (checked right away);
+4. Telegram, optional: create a bot with @BotFather (`/newbot`) and paste its token (checked),
+   then message the bot from your phone: Orion reads your id from that message, so you have
+   nothing to copy. The bot replies to confirm. Without Telegram, the app is enough.
 
-À la fin, il affiche le code pour appairer l'app (voir plus bas).
+At the end, it shows the code to pair the app (see below).
 
-Pour installer depuis un autre dépôt ou une autre branche : `ORION_REPO=… ORION_BRANCH=…`
-devant `install.sh`.
+To install from another repository or branch: put `ORION_REPO=… ORION_BRANCH=…` before
+`install.sh`.
 
-Les secrets vont dans `/etc/orion/core.env` (la clé du modèle, `orion-core`) et
-`/etc/orion/guardian.env` (le reste, `orion-guardian`), en 0600, jamais dans `orion.toml`.
-Puis Orion démarre.
+Secrets go to `/etc/orion/core.env` (the model key, `orion-core`) and `/etc/orion/guardian.env`
+(everything else, `orion-guardian`), mode 0600, never in `orion.toml`. Then Orion starts.
 
-**Ensuite, plus besoin de toucher aux fichiers** : dis-lui « active le mail », « ajoute
-Angèle, elle peut savoir quand je suis libre », « mets tes points à 9 h ». Il change ses
-réglages lui-même (`/srv/orion/config/orion.toml`), avec ton accord. Ce qui te protège (le
-gardien, les canaux, qui peut lui écrire, le budget) n'est changé qu'avec ton oui au
-changement exact, vérifié par le gardien, qui est le seul à pouvoir écrire ce fichier (D92).
-Les secrets ne passent jamais par message : ils se saisissent dans l'app (Réglages), ou dans
-le formulaire du gardien qu'Orion t'envoie quand il en a besoin, et vont droit au gardien
-(`/srv/orion/guardian/secrets.env`). `/etc/orion/guardian.env` reste possible à la main, avec
-un redémarrage.
+**After that, no more file editing**: tell it "turn on mail", "add Angèle, she may know when
+I'm free", "do your check-ins at 9 am". It changes its own settings
+(`/srv/orion/config/orion.toml`), with your consent. What protects you (the guardian, the
+channels, who can message it, the budget) only changes with your yes to the exact change,
+checked by the guardian, which is the only process allowed to write that file (D92). Secrets
+never go through messages: you enter them in the app (Settings), or in the guardian's form that
+Orion sends you when it needs one, and they go straight to the guardian
+(`/srv/orion/guardian/secrets.env`). Editing `/etc/orion/guardian.env` by hand still works,
+followed by a restart.
 
-Relancer le script met le code à jour ; il ne touche jamais à la configuration ni aux
-secrets, et ne repose les questions que si la clé OpenRouter manque.
+Running the script again updates the code; it never touches the configuration or the secrets,
+and only asks its questions again if the OpenRouter key is missing.
 
-iMessage (par Inkbox, payant) au lieu de Telegram : mets `[channels.imessage]` `enabled =
-true`, ton numéro et le handle d'Orion, `INKBOX_API_KEY` dans `guardian.env`, puis :
+iMessage (through Inkbox, paid) instead of Telegram: set `[channels.imessage]` `enabled =
+true`, your number and Orion's handle, `INKBOX_API_KEY` in `guardian.env`, then:
 
 ```bash
 sudo /srv/orion/app/deploy/orion-admin inkbox setup \
-    --webhook-url https://orion.mondomaine.fr/inkbox/webhook
+    --webhook-url https://orion.mydomain.com/inkbox/webhook
 ```
 
-Mets la clé de signature qu'il affiche dans `INKBOX_SIGNING_KEY` (`guardian.env`), envoie
-depuis ton téléphone la commande de connexion qu'il affiche, et redémarre :
+Put the signing key it prints in `INKBOX_SIGNING_KEY` (`guardian.env`), send the connection
+command it prints from your phone, and restart:
 `sudo systemctl restart orion-guardian orion-core`.
 
-`orion-admin` lance une commande `orion` sous l'utilisateur du gardien, avec ses secrets
-(`federation invite`, `inkbox calls`…). Avec `--core`, il la lance sous celui du cœur, où vont
-d'office `doctor`, `memory` et `chat`. Il est installé comme `/usr/local/bin/orion` : sur le
-serveur, `orion memory` suffit.
+`orion-admin` runs an `orion` command as the guardian's user, with its secrets
+(`federation invite`, `inkbox calls`…). With `--core`, it runs it as the core's user, which is
+where `doctor`, `memory` and `chat` always go. It is installed as `/usr/local/bin/orion`: on the
+server, `orion memory` is enough.
 
-## L'app sur l'iPhone
+## The app on the iPhone
 
-L'app d'Orion (D125) est le canal principal : la conversation, tes accords signés par Face ID, les
-notifications et tout le pilotage. Elle est ouverte sur les installations récentes ; sur une
-installation plus ancienne, relance `sudo /srv/orion/app/deploy/install.sh` (avec ton domaine,
-ou sans argument pour garder `<ip>.sslip.io`) : il ajoute `[modules.mobile]` à `orion.toml`,
-remet Caddy à jour, redémarre Orion et, si aucun téléphone n'est encore appairé, affiche le
-code du premier.
+Orion's app (D125) is the main channel: the conversation, your consents signed with Face ID,
+notifications and all the controls. It is enabled on recent installs; on an older install, run
+`sudo /srv/orion/app/deploy/install.sh` again (with your domain, or with no argument to keep
+`<ip>.sslip.io`): it adds `[modules.mobile]` to `orion.toml`, updates Caddy, restarts Orion and,
+if no phone is paired yet, shows the code for the first one.
 
-Ouvre le lien affiché dans Safari, Partager > « Sur l'écran d'accueil », ouvre Orion depuis
-l'écran d'accueil, saisis le code (une fois, 10 minutes) et crée la passkey. Les
-notifications se demandent depuis l'app.
+Open the link it shows in Safari, Share > "Add to Home Screen", open Orion from the home
+screen, enter the code (once, valid 10 minutes) and create the passkey. Notifications are
+requested from the app.
 
-**Ensuite, plus rien ne se fait sur le serveur (D154).** Tout est dans l'app, onglet
-Réglages, et ce qui compte se signe avec Face ID :
+**After that, nothing happens on the server any more (D154).** Everything is in the app,
+Settings tab, and what matters is signed with Face ID:
 
-- les réglages d'`orion.toml` et les modules ;
-- les **secrets** (clés d'API, mots de passe de boîtes mail, la clé OpenRouter) : ils vont
-  droit au gardien, Orion ne les voit jamais ; ceux qu'Orion te demande y apparaissent ;
-- **ChatGPT** : la connexion à ton forfait ;
-- les **raccourcis du téléphone** : le jeton et les adresses ;
-- les **autres Orions** : allumer, inviter, accepter un code, délier ;
-- les **machines** : le code pour en relier une (la commande à lancer sur la machine) ;
-- les **téléphones** : en ajouter un, en retirer un ;
-- les **mots de passe** : un par un, ou l'import d'un export CSV ;
-- la **bibliothèque** : tes notes (.md, .txt) ;
-- **mes ratés** : ce qu'Orion a relevé le soir de ce qu'il a raté (tes 👎, tes corrections) ;
-- la version et les mises à jour, qui se font seules.
+- `orion.toml` settings and the modules;
+- **secrets** (API keys, mailbox passwords, the OpenRouter key): they go straight to the
+  guardian, Orion never sees them; the ones Orion asks you for show up there;
+- **ChatGPT**: the connection to your subscription;
+- **phone shortcuts**: the token and the URLs;
+- **other Orions**: turn on, invite, accept a code, unlink;
+- **machines**: the code to link one (the command to run on the machine);
+- **phones**: add one, remove one;
+- **passwords**: one by one, or by importing a CSV export;
+- the **library**: your notes (.md, .txt);
+- **my misses**: what Orion noted in the evening about what it got wrong (your 👎, your
+  corrections);
+- the version and updates, which happen on their own.
 
-**Le forfait Claude** est l'exception (D100, D208) : Anthropic veut que tu te connectes
-toi-même à Claude Code, sur le serveur. `install.sh` installe Claude Code dans
-`/usr/local/bin/claude` ; une fois, lance
+**The Claude subscription** is the exception (D100, D208): Anthropic wants you to log in to
+Claude Code yourself, on the server. `install.sh` installs Claude Code in
+`/usr/local/bin/claude`; run this once:
 
 ```bash
 sudo orion claude login
 ```
 
-ouvre le lien, connecte-toi à ton compte Claude, colle le code : Orion redémarre avec ton
-forfait. La connexion vit dans `/srv/orion/data/claude-code/login` (gardée par `reset.sh`), et
-Claude Code se met à jour une fois par jour avec `orion-update`.
+Open the link, log in to your Claude account, paste the code: Orion restarts on your
+subscription. The login lives in `/srv/orion/data/claude-code/login` (kept by `reset.sh`), and
+Claude Code updates itself once a day with `orion-update`.
 
-Une passkey est liée au nom du serveur (`public_url`) : avec `sslip.io`, si l'IP du VPS change
-ou si tu passes à un vrai domaine, il faut réappairer (relance `install.sh`, qui affiche un
-code). Les commandes `orion-admin …` restent là pour dépanner.
+A passkey is tied to the server name (`public_url`): with `sslip.io`, if the VPS IP changes or
+you switch to a real domain, you need to pair again (run `install.sh` again, it shows a code).
+The `orion-admin …` commands are still there for troubleshooting.
 
-## Au quotidien
+## Day to day
 
-- **Logs** : `journalctl -u orion-core -f`, `journalctl -u orion-guardian -f`.
-- **Si le cœur tombe** : systemd le relance après 5 s. S'il reste muet plus de 5 minutes, le
-  gardien te prévient lui-même (le cœur ne peut pas dire qu'il est arrêté) : par une
-  notification de l'app, sinon par iMessage ou Telegram, puis encore quand il repart.
-- **Sauvegardes** (`orion-backup-core.timer`, `orion-backup-guardian.timer`) : chaque nuit
-  vers 4 h 15, une copie vérifiée du journal du cœur et du registre
-  du gardien va dans `/srv/orion/backups/` (30 copies gardées). Tout le reste (mémoire,
-  personnes, rappels, fiches de mail) se reconstruit à partir du journal.
-  - Pour une copie hors du serveur, avec rclone vers OVH Object Storage par exemple :
-    `rclone sync /srv/orion/backups ovh:orion-backups` dans un timer à toi.
-  - Le journal contient ta vie : chiffre le bucket.
-- **Mise à jour** : automatique (D94). Toutes les 2 minutes, `orion-update.timer` regarde
-  si la branche suivie a du nouveau. Si oui, il installe (code, services, règle sudo), vérifie
-  la config, redémarre et surveille les deux processus 75 s. Si quelque chose casse, il revient
-  à la version d'avant et écarte ce commit (`/srv/orion/update.bad`). Il te prévient sur
-  Telegram, quand il est activé, dans les deux cas ; sinon, tout est dans le journal.
-  Les mises à jour sont groupées (D251) : pas pendant que tu t'en sers (`data/busy-until`), au
-  plus une par heure, jamais retenues plus de 3 h ; un commit `[urgent]` part tout de suite.
-  Pour ne pas attendre : Réglages → Version → **Appliquer maintenant** dans l'app (D254).
-  Journal : `journalctl -u orion-update`. Le couper : `sudo systemctl disable --now
-  orion-update.timer`. Changer de branche : `sudo git -C /srv/orion/app checkout <branche>`.
-- **Secrets depuis le téléphone** (D94, D154) : « active mon mail » → le secret demandé
-  apparaît dans Réglages de l'app (ou, sur Telegram, un bouton ouvre le formulaire du gardien,
-  `/secrets/`). Tu y colles le mot de passe ; il va directement au gardien
-  (`/srv/orion/guardian/secrets.env`), jamais dans la conversation.
-- **Restaurer** : arrête les deux services, copie `journal.sqlite3` d'une sauvegarde dans
-  `/srv/orion/data/`, supprime `memory.sqlite3` (reconstruit au démarrage), redémarre.
-- **Sauvegarde complète** (D290) : les sauvegardes de la nuit ne gardent que les journaux. Pour
-  tout garder (réglages, secrets, connexions ChatGPT et Claude Code, coffre du gardien,
-  modules, fichiers, photos, navigateur et ses sites connectés), lance
-  `sudo /srv/orion/app/deploy/backup.sh` : il demande s'il faut sauvegarder ou restaurer, où
-  ranger l'archive et comment la chiffrer (phrase de passe avec age ou gpg, ou clé publique age).
-  Orion est arrêté le temps de la copie, quelques secondes, et les journaux sont vérifiés avant
-  que la copie compte. L'archive arrive dans `/root/orion-full-<date>.tar.gz[.age]`. Ensuite,
-  copie-la hors du serveur.
-  - Sans questions : `backup.sh backup --encrypt age:<clé publique> --yes`, ou
-    `backup.sh restore <archive> [--identity <clé>] --yes`.
-  - Restaurer sur un serveur neuf : lance d'abord `install.sh`, puis `backup.sh restore`.
-    L'archive est déchiffrée et vérifiée avant qu'Orion soit arrêté. Ce qui était là est
-    gardé à part (`/root/orion-before-restore-<date>.tar.gz`, qui se restaure de la même
-    façon). Si ChatGPT ne répond plus ensuite, reconnecte-toi depuis l'app : sa connexion
-    change à chaque rafraîchissement.
+- **Logs**: `journalctl -u orion-core -f`, `journalctl -u orion-guardian -f`.
+- **If the core goes down**: systemd restarts it after 5 s. If it stays silent for more than 5
+  minutes, the guardian warns you itself (the core cannot say it has stopped): through an app
+  notification, otherwise through iMessage or Telegram, and again when it comes back.
+- **Backups** (`orion-backup-core.timer`, `orion-backup-guardian.timer`): every night around
+  4:15 am, a verified copy of the core's journal and the guardian's registry goes to
+  `/srv/orion/backups/` (30 copies kept). Everything else (memory, people, reminders, mail
+  records) is rebuilt from the journal.
+  - For an off-server copy, with rclone to OVH Object Storage for example:
+    `rclone sync /srv/orion/backups ovh:orion-backups` in a timer of your own.
+  - The journal holds your life: encrypt the bucket.
+- **Updates**: automatic (D94). Every 2 minutes, `orion-update.timer` checks whether the
+  tracked branch has something new. If so, it installs it (code, services, sudo rule), checks
+  the config, restarts and watches both processes for 75 s. If something breaks, it goes back
+  to the previous version and sets that commit aside (`/srv/orion/update.bad`). It tells you on
+  Telegram, when enabled, in both cases; otherwise, everything is in the log.
+  Updates are batched (D251): not while you are using it (`data/busy-until`), at most one per
+  hour, never held back more than 3 h; an `[urgent]` commit goes out right away.
+  To skip the wait: Settings → Version → **Apply now** in the app (D254).
+  Log: `journalctl -u orion-update`. Turn it off: `sudo systemctl disable --now
+  orion-update.timer`. Change branch: `sudo git -C /srv/orion/app checkout <branch>`.
+- **Secrets from the phone** (D94, D154): "turn on my mail" → the requested secret shows up in
+  the app's Settings (or, on Telegram, a button opens the guardian's form, `/secrets/`). You
+  paste the password there; it goes straight to the guardian
+  (`/srv/orion/guardian/secrets.env`), never into the conversation.
+- **Restore**: stop both services, copy `journal.sqlite3` from a backup into
+  `/srv/orion/data/`, delete `memory.sqlite3` (rebuilt at startup), restart.
+- **Full backup** (D290): the nightly backups only keep the journals. To keep everything
+  (settings, secrets, ChatGPT and Claude Code logins, guardian vault, modules, files, photos,
+  the browser and its logged-in sites), run `sudo /srv/orion/app/deploy/backup.sh`: it asks
+  whether to back up or restore, where to put the archive and how to encrypt it (passphrase
+  with age or gpg, or an age public key). Orion is stopped during the copy, a few seconds, and
+  the journals are checked before the copy counts. The archive lands in
+  `/root/orion-full-<date>.tar.gz[.age]`. Then copy it off the server.
+  - Without questions: `backup.sh backup --encrypt age:<public key> --yes`, or
+    `backup.sh restore <archive> [--identity <key>] --yes`.
+  - Restoring on a fresh server: run `install.sh` first, then `backup.sh restore`. The archive
+    is decrypted and checked before Orion is stopped. What was there is kept aside
+    (`/root/orion-before-restore-<date>.tar.gz`, which restores the same way). If ChatGPT stops
+    answering afterwards, log in again from the app: its login changes on every refresh.
 
-## Repartir de zéro, désinstaller
+## Starting over, uninstalling
 
-**Remise à zéro** : Orion oublie tout ce qu'il a vécu et appris, mais reste installé et
-configuré.
+**Reset**: Orion forgets everything it has lived and learned, but stays installed and
+configured.
 
 ```bash
 sudo /srv/orion/app/deploy/reset.sh
 ```
 
-- **Ce qui part** (`/srv/orion/data`) : le journal, donc toutes les conversations et tout ce
-  qu'il a fait, sa mémoire, les personnes, les rappels, les missions, les tâches, la
-  bibliothèque, les fichiers, les photos, et son navigateur avec les sites où il était
-  connecté.
-- **Ce qui reste** : le code, `orion.toml` (ses réglages, les canaux, qui peut lui écrire), les
-  secrets, les modules installés, les connexions aux forfaits (ChatGPT, Claude Code) et la clé
-  de la console.
-- **Les options** :
-  - `--guardian` efface aussi le registre du gardien (accords, autonomies accordées) et les
-    identifiants du coffre ;
-  - `--backups` efface aussi les sauvegardes de la nuit : sans cette option, le passé y
-    reste ;
-  - `--no-archive` ne garde aucune copie ;
-  - `--yes` ne pose pas la question.
+- **What goes** (`/srv/orion/data`): the journal, so all conversations and everything it has
+  done, its memory, people, reminders, missions, tasks, the library, files, photos, and its
+  browser with the sites it was logged in to.
+- **What stays**: the code, `orion.toml` (its settings, the channels, who can message it), the
+  secrets, installed modules, subscription logins (ChatGPT, Claude Code) and the console key.
+- **Options**:
+  - `--guardian` also erases the guardian's registry (consents, granted autonomies) and the
+    vault's credentials;
+  - `--backups` also erases the nightly backups: without it, the past stays there;
+  - `--no-archive` keeps no copy;
+  - `--yes` skips the question.
 
-Avant d'effacer, le script garde une copie de ce qu'il retire dans
-`/root/orion-reset-<date>.tar.gz` (lisible par root seulement). Pour revenir en arrière :
-arrête les deux services, `sudo tar -C / -xzf` cette archive, puis redémarre-les.
+Before erasing, the script keeps a copy of what it removes in `/root/orion-reset-<date>.tar.gz`
+(readable by root only). To go back: stop both services, `sudo tar -C / -xzf` that archive,
+then start them again.
 
-**Désinstaller** : retire tout ce que `install.sh` a posé, c'est-à-dire les services et
-timers, le code, Python et le navigateur, les données, les secrets, la règle sudo, les utilisateurs
-`orion-core` et `orion-guardian`, et le site d'Orion dans Caddy (Caddy retrouve sa page par
-défaut).
+**Uninstall**: removes everything `install.sh` set up, that is the services and timers, the
+code, Python and the browser, the data, the secrets, the sudo rule, the `orion-core` and
+`orion-guardian` users, and Orion's site in Caddy (Caddy goes back to its default page).
 
 ```bash
-sudo /srv/orion/app/deploy/uninstall.sh            # garde une archive dans /root
-sudo /srv/orion/app/deploy/uninstall.sh --purge    # rien n'est gardé
+sudo /srv/orion/app/deploy/uninstall.sh            # keeps an archive in /root
+sudo /srv/orion/app/deploy/uninstall.sh --purge    # nothing is kept
 ```
 
-Sans `--purge`, le journal, le registre et les identifiants du gardien, la configuration et
-les secrets vont d'abord dans `/root/orion-<date>.tar.gz`. Garde cette archive en lieu sûr, ou
-efface-la : elle contient ta vie avec Orion et tes mots de passe. Pour réinstaller avec :
-`install.sh`, puis `sudo /srv/orion/app/deploy/backup.sh restore` sur l'archive.
+Without `--purge`, the journal, the guardian's registry and credentials, the configuration and
+the secrets first go to `/root/orion-<date>.tar.gz`. Keep that archive somewhere safe, or
+delete it: it holds your life with Orion and your passwords. To reinstall with it: `install.sh`,
+then `sudo /srv/orion/app/deploy/backup.sh restore` on the archive.
 
-Restent en place : Caddy, uv, ffmpeg, sqlite3 (d'autres choses peuvent s'en servir) et les
-règles du pare-feu (SSH, 80 et 443 ouverts).
+Left in place: Caddy, uv, ffmpeg, sqlite3 (other things may use them) and the firewall rules
+(SSH, 80 and 443 open).
 
-## Agir sur tes comptes
+## Acting on your accounts
 
-Comme le navigateur de ChatGPT (D116) : Orion a un seul navigateur, qui garde ses connexions
-(sur le serveur, même après un redémarrage). Quand une page a besoin de toi (te connecter, un
-code reçu par SMS, un captcha), il te passe **son** navigateur, sur la page où il en est :
-dans l'app, ou par un bouton sur Telegram (il faut alors la console en https,
-`[modules.console] public_url`, posé par l'installation). Touche l'image pour cliquer, tape le
-texte dessous, puis « J'ai fini » : il reprend, connecté. Ce que tu tapes va dans la page, pas
-dans la conversation. Pour qu'il oublie un site : « déconnecte-toi de Leboncoin ».
+Like ChatGPT's browser (D116): Orion has a single browser that keeps its logins (on the
+server, even after a restart). When a page needs you (logging in, a code received by SMS, a
+captcha), it hands you **its** browser, on the page where it is: in the app, or through a
+button on Telegram (the console must then be on https, `[modules.console] public_url`, set by
+the install). Tap the image to click, type the text below it, then "I'm done": it picks up
+again, logged in. What you type goes into the page, not into the conversation. To make it
+forget a site: "log out of Leboncoin".
 
-### Tes mots de passe, comme KeePass (D111), en option
+### Your passwords, like KeePass (D111), optional
 
-Pour qu'Orion se reconnecte seul quand un site le déconnecte, le gardien peut aussi garder ton
-identifiant d'un site : l'identifiant, le mot de passe et, si tu veux, la clé de double
-authentification. Orion remplit la page de connexion, mais c'est le gardien qui fournit les
-valeurs, seulement sur ce site : ni le modèle ni le journal ne voient ton mot de passe.
+So that Orion can log back in on its own when a site logs it out, the guardian can also keep
+your credentials for a site: the username, the password and, if you want, the two-factor key.
+Orion fills in the login page, but the guardian supplies the values, only on that site:
+neither the model nor the journal ever sees your password.
 
-- **Dans l'app** : Réglages > Mots de passe > Ajouter un accès, ou « garde mon identifiant
-  Doctolib » à Orion.
-- **Depuis ton gestionnaire** : exporte-le en CSV (KeePass, KeePassXC, Bitwarden, Chrome,
-  Firefox, 1Password), puis Réglages > Mots de passe > Importer un export, et efface le
-  fichier : il contient tes mots de passe en clair.
+- **In the app**: Settings > Passwords > Add an account, or tell Orion "keep my Doctolib
+  login".
+- **From your password manager**: export it as CSV (KeePass, KeePassXC, Bitwarden, Chrome,
+  Firefox, 1Password), then Settings > Passwords > Import an export, and delete the file: it
+  holds your passwords in plain text.
 
-L'app montre les identifiants gardés et en retire un. Un code reçu
-par SMS ou par mail : Orion te le demande. Un captcha : il te passe la page.
+The app shows the stored credentials and removes one. A code received by SMS or email: Orion
+asks you for it. A captcha: it hands you the page.
 
-Pour qu'Orion envoie des mails ou des formulaires seul, ajoute `"mail_send"` ou
-`"browser"` à `[guardian] autonomable` (ou `"*"` pour tout, D167) : il ne pourra le faire que
-dans les limites que tu lui donnes en accordant l'autonomie (à quels destinataires, sur quels
-sites).
+For Orion to send emails or forms on its own, add `"mail_send"` or `"browser"` to
+`[guardian] autonomable` (or `"*"` for everything, D167): it can then only do so within the
+limits you set when granting the autonomy (which recipients, which sites).
 
-## Tes machines
+## Your machines
 
-`[modules.hands]` est allumé à l'installation. Dans l'app, Réglages > Machines donne un code et
-la commande à lancer sur ton Mac ou ton PC (`orion hand pair https://<ton domaine> <code>
---root <dossier>`). Avec `orion hand exit on`, son navigateur sort par ta connexion quand la
-machine est allumée (D145).
+`[modules.hands]` is on after install. In the app, Settings > Machines gives a code and the
+command to run on your Mac or PC (`orion hand pair https://<your domain> <code> --root
+<folder>`). With `orion hand exit on`, its browser goes out through your connection when the
+machine is on (D145).
 
-## Rappels de lieu (iPhone)
+## Place reminders (iPhone)
 
-« Rappelle-moi d'acheter du pain quand je passe à la boulangerie. » Active `[modules.places]`
-(`enabled = true`, dans Réglages > orion.toml), puis Réglages > Raccourcis du téléphone >
-Créer un jeton (en refaire un rend l'ancien inutilisable).
+"Remind me to buy bread when I pass the bakery." Turn on `[modules.places]` (`enabled = true`,
+in Settings > orion.toml), then Settings > Phone shortcuts > Create a token (making a new one
+invalidates the old one).
 
-Sur l'iPhone, app **Raccourcis** > **Automatisation** > **Arrivée** (ou **Départ**) > choisis le
-lieu > action **Obtenir le contenu de l'URL** :
-- URL : `https://<ton domaine>/places/event`, méthode **POST** ;
-- en-tête `Authorization` : `Bearer <jeton>` ;
-- corps JSON : `{"place": "boulangerie", "event": "arrive"}` (`"leave"` pour un départ).
+On the iPhone, **Shortcuts** app > **Automation** > **Arrive** (or **Leave**) > pick the place >
+action **Get Contents of URL**:
+- URL: `https://<your domain>/places/event`, method **POST**;
+- header `Authorization`: `Bearer <token>`;
+- JSON body: `{"place": "bakery", "event": "arrive"}` (`"leave"` for leaving).
 
-Coche « Exécuter immédiatement ». Orion ne reçoit que le nom que tu as donné au lieu, et
-seulement pour les lieux où tu as mis une automatisation : jamais de coordonnées.
+Check "Run Immediately". Orion only receives the name you gave the place, and only for places
+where you set up an automation: never coordinates.

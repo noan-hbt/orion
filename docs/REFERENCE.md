@@ -1,181 +1,181 @@
-# Référence
+# Reference
 
-Ce qui existe dans le code au 28/10/2026 (jusqu'à D177) : les modules, les commandes `orion`, la
-configuration et les ports. Le pourquoi de chaque chose est dans [`DECISIONS.md`](DECISIONS.md).
+What exists in the code as of 28/10/2026 (up to D177): the modules, the `orion` commands, the
+configuration and the ports. The why of each thing is in [`DECISIONS.md`](DECISIONS.md).
 
-## Les modules
+## Modules
 
-Un module (D24) est une sous-classe de `orion.modules.base.Module` : il ajoute des consignes à la
-constitution (`src/orion/resources/<nom>.md`), des outils, des services supervisés et des
-comptes rendus pour l'initiative. La liste des modules livrés est `builtin_modules()` dans
-`src/orion/modules/registry.py` ; d'autres se chargent par le point d'entrée `orion.modules` ou
-s'installent depuis le catalogue (`orion modules install`, D105).
+A module (D24) is a subclass of `orion.modules.base.Module`: it adds instructions to the
+constitution (`src/orion/resources/<name>.md`), tools, supervised services and reports for the
+initiative engine. The list of bundled modules is `builtin_modules()` in
+`src/orion/modules/registry.py`; others load through the `orion.modules` entry point or are
+installed from the catalog (`orion modules install`, D105).
 
-Un module tourne si sa section a `enabled = true`. Le chargement échoue (fail closed) pour un
-module inconnu activé, ou pour un module activé dont un module requis ne l'est pas. La liste est
-fixée au démarrage.
+A module runs if its section has `enabled = true`. Loading fails (fail closed) for an unknown
+enabled module, or for an enabled module whose required module is not enabled. The list is fixed
+at startup.
 
-Une partie des outils est rangée dans un tiroir : l'outil `orion` les liste et les ouvre (D151).
+Some tools are kept in a drawer: the `orion` tool lists and opens them (D151).
 
-### Allumés par défaut
+### On by default
 
-| Module | Ce qu'il fait | Outils |
+| Module | What it does | Tools |
 |---|---|---|
-| `adaptation` | Apprend ton manuel : ce que tu veux, ce que tu ignores (`[adaptation]`) | `adapt`, `unlearn`, `initiative_settings`, `playbook` |
-| `consolidation` | La passe de nuit sur toute la mémoire (D174) | service |
-| `doubt` | Redemande ce qui a pu changer (D83) | `doubt_confirm`, `doubt_stale` |
-| `feeds` | Flux RSS et Atom qu'il suit (D160) | `feed_add`, `feed_drop`, `feed_list` |
-| `files` | Fabrique et envoie images, PDF, téléchargements (D60, D61) | `file` |
-| `onboarding` | Faire connaissance, une question par jour au plus (D34) | `onboarding_stop` |
-| `focus` | Concentration : seul l'urgent passe (D70) | `focus_start`, `focus_stop` |
-| `hooks` | « Quand ceci arrive, fais cela » : un événement, une heure ou une adresse déclenche une consigne, un outil ou une notification (D225) | `hooks` |
-| `notifications` | Ce qui sonne, comment et où, type par type ; cinq types nouveaux sur demande (D225) | `notifications` |
-| `expert` | Un modèle plus fort pour les questions dures (D46) | `consult_expert`, `think_harder` |
-| `missions` | Des buts poursuivis seul pendant des jours (D47) | `mission`, `missions` |
-| `tasks` | Des tâches de fond (D110) | `task` |
-| `library` | Tes notes, tes documents, toute la conversation (D48) | `library_*`, `conversations_search` |
-| `photos` | Photos et fichiers reçus, regardés une fois (D50, D63) | `attachment_look` |
-| `papers` | Le coffre de tes papiers (D74, D131) ; requiert `files`, `photos` | `papers` |
-| `thinking` | Repenser à ce qui est resté ouvert (D51, D117) | `think_later`, `follow_up*` |
-| `watch` | La veille de jour sur ta vie (D150, D155) | service |
-| `awaiting` | Attend une réponse et relance (D129) | `awaiting_*` |
-| `chronicle` | La page de ta semaine, ses erreurs (D52, D69) | `chronicle`, `mistake` |
-| `intentions` | Ce que tu veux devenir, et le droit de te contredire (D53, D66) | `intention_*`, `intentions` |
-| `goals` | Tes objectifs : jalons atteints sur preuve, liens, revue du dimanche (D267) | `goal` |
-| `relations` | Anniversaires, avant de voir quelqu'un, garder le lien (D56) | `person_birthday`, `keep_in_touch`, `saw_someone`, `meeting_soon` |
-| `contacts` | Le carnet d'adresses de ton téléphone (D159) | `contacts` |
-| `departure` | La veille d'un départ ou d'un examen (D77) | `departure_*` |
-| `advice` | Ses conseils et ce qu'ils ont donné (D65) | `advice_*` |
-| `style` | Écrire comme toi (D68) | `owner_style` |
-| `configure` | Changer ses réglages avec ton oui, demander un secret (D72, D92) | `configure_show`, `configure_change`, `secret_ask` |
-| `vocal` | Vocaux : transcrits à l'arrivée, `say` pour répondre (D71) ; requiert `files` | `say` |
-| `recap` | Le récapitulatif du soir | — |
-| `skills` | Savoir-faire en texte et catalogue public (D95) | `skill` |
-| `curiosity` | Une piste à lui par semaine (D76) ; ne tourne qu'avec `web` | `curiosity_*` |
-| `booking` | Réserver un rendez-vous (D73) ; ne tourne qu'avec `computer` | `booking` |
+| `adaptation` | Learns your manual: what you want, what you ignore (`[adaptation]`) | `adapt`, `unlearn`, `initiative_settings`, `playbook` |
+| `consolidation` | The nightly pass over all of memory (D174) | service |
+| `doubt` | Asks again about what may have changed (D83) | `doubt_confirm`, `doubt_stale` |
+| `feeds` | RSS and Atom feeds it follows (D160) | `feed_add`, `feed_drop`, `feed_list` |
+| `files` | Makes and sends images, PDFs, downloads (D60, D61) | `file` |
+| `onboarding` | Getting to know you, at most one question a day (D34) | `onboarding_stop` |
+| `focus` | Focus mode: only urgent things get through (D70) | `focus_start`, `focus_stop` |
+| `hooks` | "When this happens, do that": an event, a time or a URL triggers an instruction, a tool or a notification (D225) | `hooks` |
+| `notifications` | What rings, how and where, type by type; five new types on request (D225) | `notifications` |
+| `expert` | A stronger model for hard questions (D46) | `consult_expert`, `think_harder` |
+| `missions` | Goals pursued alone over several days (D47) | `mission`, `missions` |
+| `tasks` | Background tasks (D110) | `task` |
+| `library` | Your notes, your documents, the whole conversation (D48) | `library_*`, `conversations_search` |
+| `photos` | Photos and files received, looked at once (D50, D63) | `attachment_look` |
+| `papers` | The vault for your papers (D74, D131); requires `files`, `photos` | `papers` |
+| `thinking` | Coming back to what was left open (D51, D117) | `think_later`, `follow_up*` |
+| `watch` | The daytime watch over your life (D150, D155) | service |
+| `awaiting` | Waits for an answer and follows up (D129) | `awaiting_*` |
+| `chronicle` | The page of your week, its mistakes (D52, D69) | `chronicle`, `mistake` |
+| `intentions` | Who you want to become, and the right to contradict you (D53, D66) | `intention_*`, `intentions` |
+| `goals` | Your goals: milestones reached on evidence, links, Sunday review (D267) | `goal` |
+| `relations` | Birthdays, before seeing someone, keeping in touch (D56) | `person_birthday`, `keep_in_touch`, `saw_someone`, `meeting_soon` |
+| `contacts` | Your phone's address book (D159) | `contacts` |
+| `departure` | The day before a trip or an exam (D77) | `departure_*` |
+| `advice` | Its advice and how it turned out (D65) | `advice_*` |
+| `style` | Writing like you (D68) | `owner_style` |
+| `configure` | Changing its settings with your yes, asking for a secret (D72, D92) | `configure_show`, `configure_change`, `secret_ask` |
+| `vocal` | Voice messages: transcribed on arrival, `say` to answer (D71); requires `files` | `say` |
+| `recap` | The evening recap | — |
+| `skills` | Know-how as text and a public catalog (D95) | `skill` |
+| `curiosity` | One lead of its own per week (D76); only runs with `web` | `curiosity_*` |
+| `booking` | Booking an appointment (D73); only runs with `computer` | `booking` |
 
-### À activer
+### To turn on
 
-| Module | Section | Ce qu'il fait | Outils |
+| Module | Section | What it does | Tools |
 |---|---|---|---|
-| `mobile` | `[modules.mobile]` | L'app iPhone : canal, accords Face ID, réglages (D125, D154) | canal |
-| `telegram` | `[channels.telegram]` | Ton bot Telegram (D88, D89) | canal |
-| `imessage` | `[channels.imessage]` | iMessage par une ligne Inkbox | canal |
-| `voice` | `[voice]` | Le téléphone sur la ligne Inkbox (D40) ; requiert `imessage` | `call_me`, `call_someone` |
-| `calendar` | `[modules.calendar]` | Tes agendas en iCal, écriture Google ou CalDAV (D25, D32) | `agenda`, `calendar_add` |
-| `mail` | `[modules.mail]` | Tes boîtes en IMAP, lues en direct (D75, D171, D179) | `mail`, `mail_send`, `mail_tidy`, `mail_draft`, `mail_mark` |
-| `web` | `[modules.web]` | Recherche et lecture de pages (D31) | `web_search`, `web_read` |
-| `computer` | `[modules.computer]` | Son navigateur, persistant, passé au téléphone si besoin (D116) | `browser` |
-| `console` | `[modules.console]` | La page de contrôle dans le navigateur (D39) | `console_link` |
-| `hands` | `[modules.hands]` | Tes machines : fichiers partagés, notifications (D41) | `hands`, `hand_*` |
-| `places` | `[modules.places]` | Arrivées, départs et consignes de lieu par les Raccourcis de l'iPhone (D57, D153, D187) | `remind_at_place`, `places` |
-| `secretary` | `[modules.secretary]` | Les proches qui peuvent écrire à Orion (D54) | `contact_note`, `contact_message` |
-| `federation` | `[federation]` | Les autres Orion (D29) ; requiert `calendar` et le gardien séparé | `peers`, `meeting_*`, `peer_message` |
-| `delegation` | `[delegation]` | Les longues tâches au CLI `claude` | `delegate`, `jobs_status` |
-| `mcp` | `[modules.mcp]` | Serveurs MCP branchés (D95) | `mcp_<serveur>_<outil>` |
-| `shell` | `[modules.shell]` | Le shell du serveur, chaque commande approuvée (D96, D164) | `shell` |
+| `mobile` | `[modules.mobile]` | The iPhone app: channel, Face ID consents, settings (D125, D154) | channel |
+| `telegram` | `[channels.telegram]` | Your Telegram bot (D88, D89) | channel |
+| `imessage` | `[channels.imessage]` | iMessage through an Inkbox line | channel |
+| `voice` | `[voice]` | Phone calls on the Inkbox line (D40); requires `imessage` | `call_me`, `call_someone` |
+| `calendar` | `[modules.calendar]` | Your calendars as iCal, writing to Google or CalDAV (D25, D32) | `agenda`, `calendar_add` |
+| `mail` | `[modules.mail]` | Your mailboxes over IMAP, read live (D75, D171, D179) | `mail`, `mail_send`, `mail_tidy`, `mail_draft`, `mail_mark` |
+| `web` | `[modules.web]` | Search and page reading (D31) | `web_search`, `web_read` |
+| `computer` | `[modules.computer]` | Its persistent browser, handed to your phone when needed (D116) | `browser` |
+| `console` | `[modules.console]` | The control page in the browser (D39) | `console_link` |
+| `hands` | `[modules.hands]` | Your machines: shared files, notifications (D41) | `hands`, `hand_*` |
+| `places` | `[modules.places]` | Arrivals, departures and place-based instructions through iPhone Shortcuts (D57, D153, D187) | `remind_at_place`, `places` |
+| `secretary` | `[modules.secretary]` | The people close to you who can message Orion (D54) | `contact_note`, `contact_message` |
+| `federation` | `[federation]` | Other Orions (D29); requires `calendar` and the separate guardian | `peers`, `meeting_*`, `peer_message` |
+| `delegation` | `[delegation]` | Long tasks handed to the `claude` CLI | `delegate`, `jobs_status` |
+| `mcp` | `[modules.mcp]` | Connected MCP servers (D95) | `mcp_<server>_<tool>` |
+| `shell` | `[modules.shell]` | The server's shell, every command approved (D96, D164) | `shell` |
 
-### Outils du cœur
+### Core tools
 
-Toujours là, hors modules : `remember`, `recall`, `forget_fact`, `commitment_*`,
+Always there, outside modules: `remember`, `recall`, `forget_fact`, `commitment_*`,
 `commitments_list`, `situation_*`, `situations_list`, `provenance`, `contain_source`, `person`,
 `people`, `same_person`, `remind_me`, `reminder_*`, `reminders_list`, `planned`, `later` (D157),
 `tell` (D173), `plan`, `autonomy`, `autonomy_revoke`, `spending`.
 
-## Les paquets
+## Packages
 
-| Paquet | Rôle |
+| Package | Role |
 |---|---|
-| `core/` | Identifiants, horloge HLC, événements, journal append-only, projections, superviseur, sauvegarde |
-| `guardian/` | Politique, accords, autonomie, secrets, coffre, outbox, registre, crypto de la fédération |
-| `memory/` | Faits bi-temporels, engagements, personnes, provenance, situations, doute, passe de nuit, portrait |
-| `initiative/` | Le moteur qui parle en premier : règles, rappels, points, arbitre, `later`, simulation |
-| `cognition/` | La boucle d'agent (`loop.py`), aller au bout (`finish.py`), vérificateur, la preuve avant la parole (`grounding.py`) et la relecture après coup (`review.py`, D253) |
-| `context/` | Le compilateur de contexte (stable d'abord, pour le cache), fils, résumés, `<pendant_ce_temps>` |
-| `providers/` | `openrouter`, `chatgpt`, `claude_code`, `router` (secours), `spending` (plafond) |
-| `channels/` | Terminal, iMessage (Inkbox), Telegram, boîte de réception unifiée, balises de message |
-| `tools/` | Le contrat d'outil (fail closed), outils groupés par domaine, `tell`, `plan` |
-| `modules/` | Le contrat de module, le registre, l'installeur |
-| `mobile/` | Le serveur de l'app, les notifications, les appareils, l'app web |
-| `observability/` | Logs structurés (structlog) |
-| `resources/` | Les consignes : `constitution.md`, `closing.md`, une par module |
+| `core/` | IDs, HLC clock, events, append-only journal, projections, supervisor, backup |
+| `guardian/` | Policy, consents, autonomy, secrets, vault, outbox, registry, federation crypto |
+| `memory/` | Bi-temporal facts, commitments, people, provenance, situations, doubt, nightly pass, portrait |
+| `initiative/` | The engine that speaks first: rules, reminders, check-ins, arbiter, `later`, simulation |
+| `cognition/` | The agent loop (`loop.py`), seeing things through (`finish.py`), verifier, evidence before speech (`grounding.py`) and after-the-fact review (`review.py`, D253) |
+| `context/` | The context compiler (stable first, for the cache), threads, summaries, `<pendant_ce_temps>` |
+| `providers/` | `openrouter`, `chatgpt`, `claude_code`, `router` (fallback), `spending` (cap) |
+| `channels/` | Terminal, iMessage (Inkbox), Telegram, unified inbox, message tags |
+| `tools/` | The tool contract (fail closed), tools grouped by domain, `tell`, `plan` |
+| `modules/` | The module contract, the registry, the installer |
+| `mobile/` | The app server, notifications, devices, the web app |
+| `observability/` | Structured logs (structlog) |
+| `resources/` | The instructions: `constitution.md`, `closing.md`, one per module |
 
-Au sommet : `app.py` assemble Orion pour chaque point d'entrée, `serve.py` est le démon,
-`setup.py` l'assistant d'installation, `config.py` la configuration typée, `cli.py` les commandes.
+At the top: `app.py` assembles Orion for each entry point, `serve.py` is the daemon, `setup.py`
+the setup wizard, `config.py` the typed configuration, `cli.py` the commands.
 
-## Les commandes
+## Commands
 
-`orion [--config orion.toml] <commande>`, depuis n'importe quel dossier après
-`uv tool install --editable .`. Sans `--config` : `$ORION_CONFIG`, sinon `orion.toml` du dossier
-courant, sinon `$ORION_HOME/orion.toml` (`~/.orion` par défaut, D180). Sur le serveur, `deploy/orion-admin` les lance sous
-l'utilisateur du gardien (ou du cœur avec `--core`).
+`orion [--config orion.toml] <command>`, from any folder after `uv tool install --editable .`.
+Without `--config`: `$ORION_CONFIG`, else `orion.toml` in the current folder, else
+`$ORION_HOME/orion.toml` (`~/.orion` by default, D180). On the server, `deploy/orion-admin` runs
+them as the guardian's user (or the core's with `--core`).
 
-| Commande | Ce qu'elle fait |
+| Command | What it does |
 |---|---|
-| `setup [--server] [--secrets DIR]` | L'assistant : prénom, fuseau, gardien séparé, clé OpenRouter, Telegram |
-| `doctor` | Vérifie la configuration, le stockage et chaque module |
-| `chat` | Une conversation dans le terminal |
-| `serve` | Le démon : canaux, initiative, modules |
-| `guardian` | Le processus du gardien |
-| `memory` | Ce qu'il sait de toi (écrit `profile.md`) |
-| `forget SOURCE [--reason]` | Oublie tout ce qui vient d'une source |
-| `contain SOURCE [--apply]` | Met en quarantaine une source et ce qu'elle a touché (D38) |
-| `misses [--case N]` | Ses ratés ; `--case` en fait un cas d'évaluation |
-| `week` | Sa semaine : tours interrompus, erreurs d'outils, corrections, coût |
-| `models` | Quel modèle fait quoi, combien il réfléchit, et d'où vient chaque réglage (D233) |
-| `simulate [--days 7]` | Ce qu'il enverrait, sans rien envoyer |
-| `reminders list \| cancel ID` | Les rappels |
-| `contacts import FICHIER.vcf` | Importer un carnet d'adresses |
-| `library import DOSSIER` | Importer des notes |
-| `logins add \| import \| remove \| list` | Le coffre des identifiants (D111) |
-| `modules list \| install NOM \| remove NOM` | Les modules du catalogue |
-| `app pair NOM \| devices \| revoke NOM` | Les téléphones de l'app |
-| `hands pair NOM \| revoke NOM` | Les machines, côté serveur |
-| `hand pair SERVEUR CODE [--root DIR] [--exit] \| exit on\|off \| run` | Sur ta machine |
-| `chatgpt login \| status \| models \| logout` | Ton forfait ChatGPT |
-| `google auth CLIENT_ID` | L'écriture dans Google Agenda |
-| `inkbox setup [--webhook-url URL] \| calls` | La ligne iMessage et téléphone |
-| `federation keygen \| peers \| invite \| accept \| revoke` | Les autres Orion |
-| `console link` | Un lien de connexion à la console |
-| `places token` | Le jeton des Raccourcis de l'iPhone |
-| `notify TEXTE` | T'écrire sur Telegram (utilisé par la mise à jour) |
-| `backup DEST [--keep 14] [--guardian]` | Une sauvegarde vérifiée |
-| `check-backup CHEMIN` | Vérifier qu'une sauvegarde se restaure |
-| `version` | La version |
+| `setup [--server] [--secrets DIR]` | The wizard: first name, time zone, separate guardian, OpenRouter key, Telegram |
+| `doctor` | Checks the configuration, the storage and each module |
+| `chat` | A conversation in the terminal |
+| `serve` | The daemon: channels, initiative, modules |
+| `guardian` | The guardian process |
+| `memory` | What it knows about you (writes `profile.md`) |
+| `forget SOURCE [--reason]` | Forgets everything that came from a source |
+| `contain SOURCE [--apply]` | Quarantines a source and what it touched (D38) |
+| `misses [--case N]` | Its misses; `--case` turns one into an evaluation case |
+| `week` | Its week: interrupted turns, tool errors, corrections, cost |
+| `models` | Which model does what, how hard it thinks, and where each setting comes from (D233) |
+| `simulate [--days 7]` | What it would send, without sending anything |
+| `reminders list \| cancel ID` | Reminders |
+| `contacts import FILE.vcf` | Import an address book |
+| `library import FOLDER` | Import notes |
+| `logins add \| import \| remove \| list` | The credential vault (D111) |
+| `modules list \| install NAME \| remove NAME` | Catalog modules |
+| `app pair NAME \| devices \| revoke NAME` | The app's phones |
+| `hands pair NAME \| revoke NAME` | Machines, server side |
+| `hand pair SERVER CODE [--root DIR] [--exit] \| exit on\|off \| run` | On your machine |
+| `chatgpt login \| status \| models \| logout` | Your ChatGPT subscription |
+| `google auth CLIENT_ID` | Writing to Google Calendar |
+| `inkbox setup [--webhook-url URL] \| calls` | The iMessage and phone line |
+| `federation keygen \| peers \| invite \| accept \| revoke` | Other Orions |
+| `console link` | A login link to the console |
+| `places token` | The token for iPhone Shortcuts |
+| `notify TEXT` | Message you on Telegram (used by updates) |
+| `backup DEST [--keep 14] [--guardian]` | A verified backup |
+| `check-backup PATH` | Check that a backup restores |
+| `version` | The version |
 
-## La configuration
+## Configuration
 
-`orion.toml`, décrit option par option dans [`orion.example.toml`](../orion.example.toml). Les
-secrets n'y sont jamais : ils sont nommés (`SecretRef`) et lus dans l'environnement, ou dans le
-coffre du gardien quand ils viennent de l'app.
+`orion.toml`, described option by option in [`orion.example.toml`](../orion.example.toml).
+Secrets are never in it: they are named (`SecretRef`) and read from the environment, or from the
+guardian's vault when they come from the app.
 
-| Section | Contenu |
+| Section | Contents |
 |---|---|
-| `[agent]` | Modèles (`model`, `strong_model`, `vision_model`…), accords (`approvals` : `equilibre` ou `prudent`, D85) |
-| `[models]` | Une ligne par rôle (`conversation`, `tasks`, `memory`, `thinking`…) : `model` et `effort` (D233) |
-| `[budget]` | Plafond de dépense par jour et par mois (D79) |
-| `[providers.openrouter]`, `[providers.chatgpt]` | Les fournisseurs |
-| `[channels.telegram]`, `[channels.imessage]`, `[voice]` | Les canaux |
-| `[initiative]` | Points du jour, heures calmes, budget d'attention |
-| `[adaptation]`, `[delegation]`, `[memory]` | Modules du cœur |
-| `[guardian]` | Gardien séparé, actions qu'on peut lui confier (`autonomable`, `*` pour tout, D167) |
-| `[federation]` | Les autres Orion : `public_url`, `listen_port` |
-| `[modules.<nom>]` | Chaque module, avec `enabled` |
-| `[logging]` | Niveau et format des logs |
+| `[agent]` | Models (`model`, `strong_model`, `vision_model`…), consents (`approvals`: `equilibre` or `prudent`, D85) |
+| `[models]` | One line per role (`conversation`, `tasks`, `memory`, `thinking`…): `model` and `effort` (D233) |
+| `[budget]` | Daily and monthly spending cap (D79) |
+| `[providers.openrouter]`, `[providers.chatgpt]` | Providers |
+| `[channels.telegram]`, `[channels.imessage]`, `[voice]` | Channels |
+| `[initiative]` | Daily check-ins, quiet hours, attention budget |
+| `[adaptation]`, `[delegation]`, `[memory]` | Core modules |
+| `[guardian]` | Separate guardian, actions that can be entrusted to it (`autonomable`, `*` for everything, D167) |
+| `[federation]` | Other Orions: `public_url`, `listen_port` |
+| `[modules.<name>]` | Each module, with `enabled` |
+| `[logging]` | Log level and format |
 
-## Les ports
+## Ports
 
-Tout écoute sur `127.0.0.1` ; Caddy sert le HTTPS devant (`deploy/Caddyfile`).
+Everything listens on `127.0.0.1`; Caddy serves HTTPS in front (`deploy/Caddyfile`).
 
-| Chemin | Port | Processus |
+| Path | Port | Process |
 |---|---|---|
-| `/inkbox/webhook` | 8787 | cœur |
-| `/.well-known/agent-card.json`, `/a2a` | 8788 | gardien (fédération) |
-| `/console/*` | 8790 | cœur |
-| `/voice/live` | 8791 | cœur |
-| `/hands/*` | 8792 | cœur |
-| `/places/*` | 8793 | cœur |
-| `/hooks/in/*` | 8797 | cœur (adresses des hooks, D225) |
-| `/secrets/*` | 8794 | gardien (formulaire des secrets) |
-| `/app/*` | 8795 | gardien (l'app, l'appairage, les signatures, D134) |
-| `/app/api/*` | 8796 | cœur |
+| `/inkbox/webhook` | 8787 | core |
+| `/.well-known/agent-card.json`, `/a2a` | 8788 | guardian (federation) |
+| `/console/*` | 8790 | core |
+| `/voice/live` | 8791 | core |
+| `/hands/*` | 8792 | core |
+| `/places/*` | 8793 | core |
+| `/hooks/in/*` | 8797 | core (hook URLs, D225) |
+| `/secrets/*` | 8794 | guardian (secrets form) |
+| `/app/*` | 8795 | guardian (the app, pairing, signatures, D134) |
+| `/app/api/*` | 8796 | core |
