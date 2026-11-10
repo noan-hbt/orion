@@ -32,8 +32,9 @@ when it is worth your attention.
 | 🤝 **It gets along with other Orions** | "Set up lunch with Tom": both Orions agree on a time, sharing only your free slots. |
 | 🧩 **It grows through modules** | Calendar, mail, browser, Home Assistant, missions… The core stays small; the rest is switched on in `orion.toml`. |
 
-> **Language.** Orion talks to you in your language. Its design notes (`docs/DECISIONS.md`) and
-> some guides are still in French; the `Dxxx` references below point to them.
+> **Language.** Orion talks to you in your language. The deployment guide and the reference are
+> in English; the design notes (`docs/DECISIONS.md`, where the `Dxxx` references below point)
+> and the internal docs are still in French.
 
 ## Contents
 
@@ -132,7 +133,7 @@ signed with Face ID. Orion updates itself. Running `install.sh` again updates th
 touching the configuration or the secrets.
 
 All the details (iMessage through Inkbox, location reminders, password vault, ports):
-[`deploy/README.md`](deploy/README.md) (in French).
+[`deploy/README.md`](deploy/README.md).
 
 ## Using it
 
