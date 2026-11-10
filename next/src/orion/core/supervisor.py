@@ -6,7 +6,7 @@ escalation hook (to warn the owner) and stops the whole tree, rather than limpin
 dead component. Nothing dies silently.
 
 A service is meant to run forever: one that returns counts as a crash. A server inside a
-service must leave signals to the process (`telos.host.serve` handles them once for all):
+service must leave signals to the process (`orion.host.serve` handles them once for all):
 otherwise a server that returns on SIGTERM looks like a crash and restarts in a loop.
 """
 
@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from telos.core.events import Event, NewEvent, Provenance, Trust
+from orion.core.events import Event, NewEvent, Provenance, Trust
 
 log = logging.getLogger(__name__)
 

@@ -3,26 +3,11 @@
 *Ouvert le 09/11/2026. Décisions D291 à D295. Référence : `audit OpenBot, non publié` (ce
 dossier).*
 
-## Le nom : Telos (D294)
+## Le nom : Orion (D297)
 
-*Telos* (τέλος) est le mot grec de la fin, au sens du **but** : ce en vue de quoi une chose
-existe. Chez Aristote, c'est la « cause finale ». Le telos du gland est le chêne, celui de
-l'œil est de voir. On ne comprend vraiment une chose qu'en sachant vers quoi elle tend. Du même
-mot vient *teleios*, « achevé, accompli » : atteindre son telos, c'est aller au bout.
-
-Pourquoi ce nom :
-
-- **Comprendre le but, pas seulement la demande.** Un bon agent cherche ce que son
-  propriétaire veut vraiment atteindre derrière ce qu'il dit, et l'aide à y aller, parfois
-  avant qu'il le demande.
-- **Aller au bout.** La v1 laissait des choses à moitié faites. Le critère de réussite de la v2
-  est le travail mené à terme et prouvé (audit §1.4) : un travail n'est fini que quand son but
-  est atteint.
-- **Une équipe tendue vers un même but.** Chaque agent a sa fonction, et tous servent les buts
-  d'une seule personne.
-
-Le produit s'appelle Telos ; l'agent personnel de chacun porte le nom que son propriétaire lui
-donne au premier lancement (le nôtre reste Orion).
+Le produit conserve le nom **Orion** pour la v2 (D297, annule D294 qui introduisait temporairement
+le nom de code Telos). Orion désigne à la fois le produit et l'agent personnel principal. Le
+paquet dans `next/` et la commande associée s'appellent `orion`.
 
 ## Pourquoi
 
@@ -78,7 +63,7 @@ relecture**, ce que la v1 a de prouvé ; le reste est réécrit pour la nouvelle
 Règles :
 
 - **Rien n'est importé depuis `src/orion`.** Une brique reprise est copiée dans `next/`, relue,
-  simplifiée, testée. Le paquet v2 s'appelle `telos` et vit dans son propre projet
+  simplifiée, testée. Le paquet v2 s'appelle `orion` et vit dans son propre projet
   (`next/pyproject.toml`), avec ses tests et sa CI.
 - **La v1 n'évolue plus**, sauf correctif urgent pour l'instance en service.
 - **La bascule est la dernière partie** : import des données de l'instance v1, parité vérifiée,

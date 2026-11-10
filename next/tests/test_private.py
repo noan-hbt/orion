@@ -1,4 +1,4 @@
-"""Files only Telos's user may read are created that way."""
+"""Files only Orion's user may read are created that way."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from telos.core.private import write_private
+from orion.core.private import write_private
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file permissions not supported on Windows")
 def test_a_private_file_is_never_readable_by_others(tmp_path: Path) -> None:
     old = os.umask(0)  # even with a permissive umask
     try:

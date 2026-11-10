@@ -20,8 +20,12 @@ federation. Everything else answers 404. The port table is in
 On a fresh VPS running Debian 12 or Ubuntu 24.04, logged in over SSH:
 
 ```bash
+# Guided install in one line (recommended, no need to clone the repository):
+curl -fsSL https://raw.githubusercontent.com/noan-hbt/orion/main/install.sh | sudo bash
+
+# Or by hand, cloning the repository:
 git clone https://github.com/noan-hbt/orion.git && cd orion
-sudo deploy/install.sh orion.mydomain.com     # or with no argument: <ip>.sslip.io
+sudo ./install.sh orion.mydomain.com     # or with no argument: <ip>.sslip.io
 ```
 
 For your own domain name, first create an A record pointing to the VPS IP (in OVH: Web Cloud >
@@ -152,14 +156,19 @@ The `orion-admin …` commands are still there for troubleshooting.
   `/srv/orion/data/`, delete `memory.sqlite3` (rebuilt at startup), restart.
 - **Full backup** (D290): the nightly backups only keep the journals. To keep everything
   (settings, secrets, ChatGPT and Claude Code logins, guardian vault, modules, files, photos,
-  the browser and its logged-in sites), run `sudo /srv/orion/app/deploy/backup.sh`: it asks
+  the browser and its logged-in sites), just run:
+  ```bash
+  sudo orion backup
+  ```
+  (or `sudo /srv/orion/app/deploy/backup.sh`): the assistant asks
   whether to back up or restore, where to put the archive and how to encrypt it (passphrase
   with age or gpg, or an age public key). Orion is stopped during the copy, a few seconds, and
   the journals are checked before the copy counts. The archive lands in
   `/root/orion-full-<date>.tar.gz[.age]`. Then copy it off the server.
-  - Without questions: `backup.sh backup --encrypt age:<public key> --yes`, or
-    `backup.sh restore <archive> [--identity <key>] --yes`.
-  - Restoring on a fresh server: run `install.sh` first, then `backup.sh restore`. The archive
+  - Without questions: `sudo orion backup --yes` or
+    `sudo /srv/orion/app/deploy/backup.sh backup --encrypt age:<public key> --yes`.
+  - Restoring an archive: `sudo orion restore` (interactive assistant) or `sudo orion restore <archive>`.
+  - Restoring on a fresh server: run `install.sh` first, then `sudo orion restore <archive>`. The archive
     is decrypted and checked before Orion is stopped. What was there is kept aside
     (`/root/orion-before-restore-<date>.tar.gz`, which restores the same way). If ChatGPT stops
     answering afterwards, log in again from the app: its login changes on every refresh.
@@ -170,8 +179,9 @@ The `orion-admin …` commands are still there for troubleshooting.
 configured.
 
 ```bash
-sudo /srv/orion/app/deploy/reset.sh
+sudo orion reset
 ```
+(or `sudo /srv/orion/app/deploy/reset.sh`)
 
 - **What goes** (`/srv/orion/data`): the journal, so all conversations and everything it has
   done, its memory, people, reminders, missions, tasks, the library, files, photos, and its
@@ -194,14 +204,15 @@ code, Python and the browser, the data, the secrets, the sudo rule, the `orion-c
 `orion-guardian` users, and Orion's site in Caddy (Caddy goes back to its default page).
 
 ```bash
-sudo /srv/orion/app/deploy/uninstall.sh            # keeps an archive in /root
-sudo /srv/orion/app/deploy/uninstall.sh --purge    # nothing is kept
+sudo orion uninstall            # interactive, offers a backup archive
+sudo orion uninstall --purge    # permanent removal, no archive
 ```
+(or `sudo /srv/orion/app/deploy/uninstall.sh`)
 
 Without `--purge`, the journal, the guardian's registry and credentials, the configuration and
 the secrets first go to `/root/orion-<date>.tar.gz`. Keep that archive somewhere safe, or
 delete it: it holds your life with Orion and your passwords. To reinstall with it: `install.sh`,
-then `sudo /srv/orion/app/deploy/backup.sh restore` on the archive.
+then `sudo orion restore <archive>`.
 
 Left in place: Caddy, uv, ffmpeg, sqlite3 (other things may use them) and the firewall rules
 (SSH, 80 and 443 open).

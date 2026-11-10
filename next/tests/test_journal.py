@@ -10,11 +10,11 @@ from typing import Any
 
 import pytest
 
-from telos.core.events import NewEvent, Provenance, Trust, derive_trust
-from telos.core.hlc import HybridClock, Timestamp
-from telos.core.ids import UlidGenerator
-from telos.core.journal import REDACTED_KIND, SqliteJournal
-from telos.core.upcast import EventVersions, NewerEventError
+from orion.core.events import NewEvent, Provenance, Trust, derive_trust
+from orion.core.hlc import HybridClock, Timestamp
+from orion.core.ids import UlidGenerator
+from orion.core.journal import REDACTED_KIND, SqliteJournal
+from orion.core.upcast import EventVersions, NewerEventError
 
 
 def event(kind: str = "test.happened", **payload: Any) -> NewEvent:
@@ -124,7 +124,7 @@ async def test_old_events_are_read_in_todays_shape_without_rewriting_them(tmp_pa
     db.close()
 
 
-async def test_an_event_from_a_newer_telos_is_refused(tmp_path: Path) -> None:
+async def test_an_event_from_a_newer_orion_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "j.sqlite3"
     async with SqliteJournal(path, HybridClock("t"), EventVersions({"x.y": [lambda p: p]})) as j:
         await j.append([event("x.y")])

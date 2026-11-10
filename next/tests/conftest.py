@@ -1,6 +1,6 @@
 """Shared fixtures. Every projection built on a test's `journal` is rebuilt from the journal
 alone at the end of the test and must come back identical (D81): the whole suite doubles as a
-replay test of every part of Telos. A test that breaks this on purpose carries
+replay test of every part of Orion. A test that breaks this on purpose carries
 `@pytest.mark.no_rebuild_check`."""
 
 from __future__ import annotations
@@ -11,10 +11,10 @@ from typing import Any
 
 import pytest
 
-from telos.core.events import NewEvent, Provenance, Trust
-from telos.core.hlc import HybridClock
-from telos.core.journal import SqliteJournal
-from telos.core.projections import ProjectionRunner
+from orion.core.events import NewEvent, Provenance, Trust
+from orion.core.hlc import HybridClock
+from orion.core.journal import SqliteJournal
+from orion.core.projections import ProjectionRunner
 
 
 def pytest_configure(config: pytest.Config) -> None:

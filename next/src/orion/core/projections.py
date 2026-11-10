@@ -29,8 +29,8 @@ from typing import Any, ClassVar, Protocol, Self
 
 from pydantic import BaseModel
 
-from telos.core.events import Event
-from telos.core.sqlite import SqliteWorker, dump
+from orion.core.events import Event
+from orion.core.sqlite import SqliteWorker, dump
 
 log = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ class ProjectionRunner:
     @classmethod
     async def rebuild_everywhere(cls, journal: EventSource) -> int:
         """Every projection of every runner on `journal` in this process, rebuilt: after a
-        redaction, no part of Telos keeps what was forgotten, not only the one that forgot."""
+        redaction, no part of Orion keeps what was forgotten, not only the one that forgot."""
         applied = 0
         for runner in cls.on(journal):
             applied += await runner.rebuild_all()

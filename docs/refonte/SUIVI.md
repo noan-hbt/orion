@@ -18,10 +18,10 @@ Statuts : `à faire` · `en cours` · `en revue` (PR ouverte) · `fait` (fusionn
 | R0.1 Cap, feuille de route, suivi | fait | #238 | |
 | R0.2 Fiches d'inspiration | fait | #239 | synthèse validée, H et I repris (D296) |
 | R0.3 Carte de la v1 à reprendre | fait | #240 | `reprise-v1.md` |
-| R1.1 Squelette `next/` | fait | #241 | paquet `telos`, commande `telos --version`, job CI `telos` |
-| R1.2 Journal | fait | #242 | `telos.core` : journal, événements, versions, fichiers privés |
+| R1.1 Squelette `next/` | fait | #241 | paquet `orion`, commande `orion --version`, job CI `v2` |
+| R1.2 Journal | fait | #242 | `orion.core` : journal, événements, versions, fichiers privés |
 | R1.3 Projections | fait | #243 | runner, `SqliteProjection` (checkpoint et version de schéma), vérification D81 en fin de test |
-| R1.4 Supervision et cycle de vie | fait | #244 | `telos.core.supervisor`, `telos serve` (`telos.host`), pannes et cycle de vie journalisés |
+| R1.4 Supervision et cycle de vie | fait | #244 | `orion.core.supervisor`, `orion serve` (`orion.host`), pannes et cycle de vie journalisés |
 | R1.5 Réglages en base | à faire | | |
 | R1.6 Sauvegarde et restauration | à faire | | |
 
@@ -46,7 +46,7 @@ route : un piège, un choix provisoire, un test lent. Court ; on efface ce qui n
 - R1.1 : l'arborescence de l'audit §6.4 n'est **pas** créée d'avance (« sans fichiers vides
   inutiles ») ; chaque sous-paquet (`core`, `agents`, `queue`…) naît avec sa première tâche,
   la liste est dans `next/CLAUDE.md`. Le délai de 60 s des tests vient de `pytest-timeout`.
-- R1.1 : `next/` a son propre `uv.lock` et son job CI `telos` ; le job v1 `check` ne le voit
+- R1.1 : `next/` a son propre `uv.lock` et son job CI `v2` ; le job v1 `check` ne le voit
   que par `ruff` (même réglages).
 - R1.2 : l'append-only est tenu **par la base** (déclencheurs SQLite) : seule une redaction
   (`payload = '{}'`, `redacted = 1`) passe ; tout autre `UPDATE` ou `DELETE` échoue. Un
@@ -75,7 +75,7 @@ route : un piège, un choix provisoire, un test lent. Court ; on efface ce qui n
   n'avale pas). `serve` journalise `host.started` puis `host.stopped` (`reason` : le signal, ou
   `failure`, code de sortie 1). Pas encore de canal pour prévenir le propriétaire : le crochet
   `escalate` existe, `serve` ne le branche pas encore.
-- R1.4 : `--data-dir` vaut `~/.telos` par défaut, **provisoire** : R1.5 découvre le dossier
+- R1.4 : `--data-dir` vaut `~/.orion` par défaut, **provisoire** : R1.5 découvre le dossier
   selon la plateforme. `core/web.py` (serveur HTTP qui laisse les signaux au processus) n'est
   pas repris : à reprendre avec le premier serveur HTTP (API, P5), sinon un uvicorn qui rend la
   main sur SIGTERM ressemble à une panne et boucle.
@@ -86,9 +86,12 @@ Ce qui attend une décision du propriétaire. Une tâche qui en dépend ne comme
 
 *(aucune)*
 
+Tranchées le 10/11/2026 :
+
+- **Le produit conserve le nom Orion pour la v2** (D297, annule D294). Paquet et commande : `orion`.
+
 Tranchées le 09/11/2026 :
 
-- **Le produit s'appelle Telos** (D294, sens dans `00-cap.md`). Paquet et commande : `telos`.
 - **Hébergé : le propriétaire paie les modèles** pour l'instant (D295). R10.4 prévoit donc un
   plafond de dépense par instance.
 - **Synthèse des inspirations validée**, avec la voix et les achats par l'agent repris (D296) :

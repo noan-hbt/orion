@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from telos.core.events import Event, NewEvent
-from telos.core.journal import SqliteJournal
-from telos.core.projections import ProjectionRunner, SqliteProjection
+from orion.core.events import Event, NewEvent
+from orion.core.journal import SqliteJournal
+from orion.core.projections import ProjectionRunner, SqliteProjection
 from tests.conftest import make_event
 
 

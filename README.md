@@ -113,9 +113,12 @@ without one, `<ip>.sslip.io` is enough for HTTPS.
 2. **Install**, over SSH on the VPS:
 
    ```bash
-   git clone https://github.com/noan-hbt/orion.git && cd orion
-   sudo deploy/install.sh orion.example.com     # or with no argument: <ip>.sslip.io
+   curl -fsSL https://raw.githubusercontent.com/noan-hbt/orion/main/install.sh | sudo bash
    ```
+
+   Nothing to clone: this starts an interactive installer that walks you through it (it offers
+   `<ip>.sslip.io` as the address, press Enter or type your own domain). To clone it yourself:
+   `git clone https://github.com/noan-hbt/orion.git && cd orion && sudo ./install.sh orion.example.com`.
 
    The script installs everything (Caddy for HTTPS, Python, ffmpeg, Orion's browser, two users,
    the services, the firewall), then asks four questions: your first name and time zone, keeping
@@ -186,7 +189,7 @@ are rebuilt from the journal. These copies hold **only the journals**, and stay 
 vault, modules, files, photos, the browser and its signed-in sites.
 
 ```bash
-sudo /srv/orion/app/deploy/backup.sh
+sudo orion backup
 ```
 
 It asks whether to back up or restore, where to put the archive (`/root` by default) and how to
@@ -201,14 +204,15 @@ rclone copy /root/orion-full-<date>.tar.gz.age ovh:orion-backups
 Without questions, for a timer of your own:
 
 ```bash
-sudo /srv/orion/app/deploy/backup.sh backup --encrypt age:<public key> --yes
+sudo orion backup full --encrypt age:<public key> --yes
 ```
 
 **Restore**, on the same server or a new one: on a new server, run `install.sh` first (with the
 same domain, otherwise you will need to pair the app again), then
 
 ```bash
-sudo /srv/orion/app/deploy/backup.sh restore     # offers the archives in /root
+sudo orion restore                # offers the archives in /root
+sudo orion restore <archive>      # or a given one
 ```
 
 The archive is decrypted and verified before Orion is stopped; what was there is kept aside
@@ -226,9 +230,9 @@ missions, files, browser), but keeps its settings, secrets, modules and your sub
 sessions.
 
 ```bash
-sudo /srv/orion/app/deploy/reset.sh               # the guardian and the backups stay
-sudo /srv/orion/app/deploy/reset.sh --guardian    # ... the guardian forgets too (approvals, passwords)
-sudo /srv/orion/app/deploy/reset.sh --backups     # ... and the nightly backups
+sudo orion reset               # the guardian and the backups stay
+sudo orion reset --guardian    # ... the guardian forgets too (approvals, passwords)
+sudo orion reset --backups     # ... and the nightly backups
 ```
 
 A copy of what goes is kept first in `/root/orion-reset-<date>.tar.gz` (`--no-archive` to keep
@@ -238,12 +242,12 @@ none).
 secrets, sudo rule, users, Caddy site).
 
 ```bash
-sudo /srv/orion/app/deploy/uninstall.sh            # keeps an archive in /root
-sudo /srv/orion/app/deploy/uninstall.sh --purge    # nothing is kept
+sudo orion uninstall            # asks first, keeps an archive in /root
+sudo orion uninstall --purge    # nothing is kept
 ```
 
 Without `--purge`, data, configuration and secrets go first to `/root/orion-<date>.tar.gz`. To
-come back later: `install.sh`, then `backup.sh restore` on that archive. To erase everything for
+come back later: `install.sh`, then `sudo orion restore` on that archive. To erase everything for
 good, also delete the archives in `/root` and those you copied elsewhere: they hold your life
 with Orion and your passwords. Caddy, uv, ffmpeg, sqlite3 and the firewall rules stay in place.
 

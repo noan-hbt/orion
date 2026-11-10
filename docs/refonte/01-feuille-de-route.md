@@ -48,7 +48,7 @@ Le plan, les décisions, la façon de travailler.
 
 Le projet `next/` existe, outillé, avec le journal et ce qui le porte.
 
-- **R1.1 — Squelette `next/`.** `next/pyproject.toml` (uv, Python 3.12+, paquet `telos`, commande `telos`), ruff,
+- **R1.1 — Squelette `next/`.** `next/pyproject.toml` (uv, Python 3.12+, paquet `orion`, commande `orion`), ruff,
   pyright strict, pytest (timeout 60 s), job CI séparé dans `.github/workflows/ci.yml`,
   `next/CLAUDE.md` court qui renvoie au cap. Arborescence de l'audit §6.4, sans fichiers vides
   inutiles. *Fait quand* : `uv run pytest` et `pyright` passent à vide dans `next/`, en CI aussi.
@@ -58,7 +58,7 @@ Le projet `next/` existe, outillé, avec le journal et ce qui le porte.
 - **R1.3 — Projections.** Reprise de `core/projections.py` : runner, reconstruction depuis le
   journal, versions de schéma. *Fait quand* : une projection détruite se reconstruit à l'identique.
 - **R1.4 — Supervision et cycle de vie.** Reprise de `core/supervisor.py` : services supervisés,
-  arrêt propre, journalisation des pannes. Un point d'entrée `telos serve` minimal.
+  arrêt propre, journalisation des pannes. Un point d'entrée `orion serve` minimal.
   *Fait quand* : un service qui plante est relancé et journalisé ; `serve` démarre et s'arrête.
 - **R1.5 — Réglages en base.** Les réglages vivent dans une projection éditable par API (avec
   événement `settings.changed`), plus de TOML obligatoire ; chemins de données découverts selon
@@ -68,7 +68,7 @@ Le projet `next/` existe, outillé, avec le journal et ce qui le porte.
   chiffré, espaces), vérification avant restauration (D81, D290). *Fait quand* : une instance
   restaurée dans un dossier neuf rejoue son journal à l'identique.
 
-**Démonstration** : `telos serve` démarre sans configuration, journalise, se sauvegarde et se
+**Démonstration** : `orion serve` démarre sans configuration, journalise, se sauvegarde et se
 restaure.
 
 ## P2 — Agents et droits
@@ -121,7 +121,7 @@ d'état (audit §8). C'est la partie la plus risquée : on la fait lentement.
   n'a pas d'effet, on passe en `UNCERTAIN` ce qui en a peut-être eu, on le signale au
   propriétaire. Tests de chaos (kill -9 à cinq moments d'un tour). *Fait quand* : tous les
   invariants de §8.3 sont prouvés par des tests reproductibles.
-- **R3.6 — Client en ligne de commande.** `telos chat <agent>`, `telos queue`, `telos stop` sur
+- **R3.6 — Client en ligne de commande.** `orion chat <agent>`, `orion queue`, `orion stop` sur
   l'API interne, pour tester sans interface. *Fait quand* : on envoie un travail à un agent fictif
   (moteur de test) et on le suit jusqu'au bout.
 
@@ -229,7 +229,7 @@ Ce qui fait d'Orion un compagnon et pas un IDE à bots, porté par l'agent `prim
 - **R8.3 — Choix de la pile front.** Prototype court, décision écrite (D…). Une seule interface
   pour le bureau, le web et la PWA. *Fait quand* : décision acceptée par le propriétaire.
 - **R8.4 — Premier lancement.** Assistant : langue, nom de l'agent personnel, fournisseur, connexion, premier
-  message. *Fait quand* : une personne qui n'a jamais vu Telos arrive à son premier échange sans
+  message. *Fait quand* : une personne qui n'a jamais vu Orion arrive à son premier échange sans
   aide. L'agent personnel prend le nom choisi ici.
 - **R8.5 — Agents, canaux, conversation** (ORB-039). Barre latérale, conversation riche
   (outils, fichiers, réactions), création et réglage d'un agent. *Fait quand* : 3 agents, 2
@@ -277,7 +277,7 @@ sans terminal.
   retour arrière (reprise D94). *Fait quand* : un VPS vierge a Orion en une commande, le reste
   dans le navigateur.
 - **R10.2 — App de bureau.** Fenêtre native autour de l'interface web, cœur Python embarqué,
-  installeurs Mac/Windows/Linux, mise à jour. Vérification du nom « Telos » côté marques avant toute diffusion publique (D294). Choix de la technique écrit (D…). *Fait quand* :
+  installeurs Mac/Windows/Linux, mise à jour (nom Orion conservé, D297). Choix de la technique écrit (D…). *Fait quand* :
   installation par double-clic, Orion continue quand la fenêtre est fermée.
 - **R10.3 — Passer du bureau au serveur.** Exporter son instance et la reprendre ailleurs (via
   R1.6). *Fait quand* : une instance de bureau déménage sur un serveur sans perte.

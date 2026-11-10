@@ -8,7 +8,7 @@ copier.*
 Quatre produits, deux familles :
 
 - **Équipes d'agents sur sa machine** : OpenBot, OpenMausBot. Des agents nommés, chacun avec son
-  modèle et son espace, qui se parlent dans des canaux. Proches de ce que Telos veut héberger.
+  modèle et son espace, qui se parlent dans des canaux. Proches de ce qu'Orion veut héberger.
 - **Un agent toujours allumé, dans le nuage** : OpenAI Dots, Claude Duet. Un seul agent qui
   travaille entre les conversations, sur sa propre machine virtuelle, et revient vers vous. Proches
   de ce qu'Orion est déjà, en plus poli.
@@ -224,7 +224,7 @@ pas l'obliger à ouvrir une app de plus. Le coût du travail de fond doit se voi
 |---|---|---|---|
 | A | Accès complet sans plus rien demander après le premier lancement | OpenBot | Le gardien vérifie chaque effet (D291, anti-patterns `00-cap.md`) |
 | B | Applis autorisées une fois pour tous les agents | OpenMausBot | Les droits sont par agent, vérifiés à chaque effet (R2.4) |
-| C | Déclencheurs qui ne marchent que si l'app est ouverte | OpenMausBot | Telos tourne aussi en serveur et en hébergé (D292) |
+| C | Déclencheurs qui ne marchent que si l'app est ouverte | OpenMausBot | Orion tourne aussi en serveur et en hébergé (D292) |
 | D | Un oubli qui ne se propage pas (déconnecter une source garde ce qui en a été appris) | Dots | `redact` se propage (règles CLAUDE.md, R6.2) |
 | E | Mémoire seulement par fil | OpenMausBot | Mémoire sourcée avec portées (R6.1, R6.2) |
 | F | Agent enfermé dans un seul fournisseur et un seul cloud | Dots, Duet | Multi-fournisseurs, instance à soi (D292) |

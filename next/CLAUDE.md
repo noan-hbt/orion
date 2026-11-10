@@ -1,6 +1,6 @@
-# Telos — notes for coding agents
+# Orion v2 — notes for coding agents
 
-Telos is the v2 of Orion: a team of persistent agents serving one person's goals. Why and what:
+This is the v2 of Orion: a team of persistent agents serving one person's goals. Why and what:
 `../docs/refonte/00-cap.md`. Where we are and what's next: `../docs/refonte/SUIVI.md`. The
 tasks: `../docs/refonte/01-feuille-de-route.md`. The root `../CLAUDE.md` rules apply here too.
 

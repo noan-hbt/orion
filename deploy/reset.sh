@@ -18,6 +18,11 @@
 # unless --no-archive. Undo: stop both services, unpack it into /, start them again.
 set -euo pipefail
 
+# Reconnecter stdin au terminal si exécuté via pipe
+if [ ! -t 0 ] && [ -e /dev/tty ]; then
+    exec < /dev/tty
+fi
+
 ROOT="${ORION_ROOT:-/srv/orion}"  # ORION_ROOT: a pretend installation, to try the script out
 GUARDIAN=0
 BACKUPS=0

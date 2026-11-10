@@ -21,6 +21,25 @@ if TYPE_CHECKING:
     from orion.providers.router import Router
 
 
+def _run_deploy_script(name: str, script_args: list[str]) -> int:
+    import subprocess
+
+    candidate_locations = [
+        Path(__file__).resolve().parent.parent.parent / "deploy" / name,
+        Path("/srv/orion/app/deploy") / name,
+    ]
+    script_path = None
+    for loc in candidate_locations:
+        if loc.is_file():
+            script_path = loc
+            break
+    if not script_path:
+        print(f"Erreur : le script de déploiement {name!r} est introuvable.")
+        return 1
+    result = subprocess.run(["bash", str(script_path), *script_args])
+    return result.returncode
+
+
 def _provider(config: OrionConfig) -> Router | None:
     from orion.providers.base import ModelProvider
     from orion.providers.openrouter import OpenRouterProvider
@@ -1217,12 +1236,29 @@ def main(argv: list[str] | None = None) -> int:
     library_sub = library.add_subparsers(dest="library_command", required=True)
     library_import = library_sub.add_parser("import", help="Add a folder of notes (.md, .txt)")
     library_import.add_argument("folder", type=Path)
-    backup = sub.add_parser("backup", help="Copy the journal (everything else is rebuilt)")
-    backup.add_argument("destination", type=Path, help="Folder that holds the copies")
+    backup = sub.add_parser("backup", help="Copy the journal or make a full backup")
+    backup.add_argument("destination", type=Path, nargs="?", default=None, help="Folder that holds the copies")
     backup.add_argument("--keep", type=int, default=14, help="Copies kept, newest first")
     backup.add_argument(
         "--guardian", action="store_true", help="Copy the guardian's ledger instead"
     )
+    backup.add_argument("--full", action="store_true", help="Launch the full interactive backup assistant")
+    backup.add_argument("--yes", action="store_true", help="Confirm without prompting")
+
+    restore = sub.add_parser("restore", help="Restore a full backup of Orion (interactive)")
+    restore.add_argument("archive", nargs="?", default=None, help="The backup archive to restore")
+    restore.add_argument("--yes", action="store_true", help="Confirm without prompting")
+
+    uninstall = sub.add_parser("uninstall", help="Remove Orion from this server cleanly")
+    uninstall.add_argument("--purge", action="store_true", help="Delete all data without keeping a backup archive")
+    uninstall.add_argument("--yes", action="store_true", help="Confirm uninstallation without prompting")
+
+    reset = sub.add_parser("reset", help="Start Orion over from zero: forgets conversations and memory")
+    reset.add_argument("--guardian", action="store_true", help="Reset guardian ledger and vault as well")
+    reset.add_argument("--backups", action="store_true", help="Delete nightly backups as well")
+    reset.add_argument("--no-archive", action="store_true", help="Do not keep a safety archive")
+    reset.add_argument("--yes", action="store_true", help="Confirm reset without prompting")
+
     simulate = sub.add_parser(
         "simulate", help="Play the next days of initiative on a copy: what Orion would send"
     )
@@ -1245,6 +1281,44 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "setup":
         return _setup(args.config, args.secrets, args.server)
+
+    if args.command == "uninstall":
+        uninstall_extra: list[str] = []
+        if args.purge:
+            uninstall_extra.append("--purge")
+        if args.yes:
+            uninstall_extra.append("--yes")
+        return _run_deploy_script("uninstall.sh", uninstall_extra)
+
+    if args.command == "reset":
+        reset_extra: list[str] = []
+        if args.guardian:
+            reset_extra.append("--guardian")
+        if args.backups:
+            reset_extra.append("--backups")
+        if args.no_archive:
+            reset_extra.append("--no-archive")
+        if args.yes:
+            reset_extra.append("--yes")
+        return _run_deploy_script("reset.sh", reset_extra)
+
+    if args.command == "restore":
+        restore_extra = ["restore"]
+        if args.archive:
+            restore_extra.append(str(args.archive))
+        if args.yes:
+            restore_extra.append("--yes")
+        return _run_deploy_script("backup.sh", restore_extra)
+
+    if args.command == "backup" and (args.destination is None or args.full):
+        backup_extra: list[str] = []
+        if args.full or args.yes:
+            backup_extra.append("backup")
+        if args.destination:
+            backup_extra.extend(["--to", str(args.destination)])
+        if args.yes:
+            backup_extra.append("--yes")
+        return _run_deploy_script("backup.sh", backup_extra)
 
     folder = (args.config or default_config_path()).resolve().parent
     load_env_files(folder, args.command)

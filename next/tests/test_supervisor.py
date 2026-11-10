@@ -7,8 +7,8 @@ import asyncio
 
 import pytest
 
-from telos.core.journal import SqliteJournal
-from telos.core.supervisor import (
+from orion.core.journal import SqliteJournal
+from orion.core.supervisor import (
     CRASHED_KIND,
     GAVE_UP_KIND,
     RestartPolicy,
