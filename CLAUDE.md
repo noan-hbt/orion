@@ -61,7 +61,7 @@ switch-over, **all new work is the refonte**; v1 (`src/orion`) only gets urgent 
 - Start every session by reading `docs/refonte/SUIVI.md` (where we are, next task, handoff,
   open questions), then the task in `docs/refonte/01-feuille-de-route.md`. The why is in
   `docs/refonte/00-cap.md`.
-- v2 is named **Telos** (D294) and lives in `next/` (its own uv project, package `telos`). Never import from `src/orion`: a
+- v2 lives in `next/` (its own uv project, package `orion`, D297). Never import from `src/orion`: a
   reused piece is copied, reread, simplified and tested in `next/`. Run commands from `next/`.
 - One task (`R<p>.<n>`) = one branch `refonte/R<p>.<n>-<topic>` = one PR titled `R<p>.<n> ...`.
   Only start a task whose prerequisites are merged and that has no open question in `SUIVI.md`.

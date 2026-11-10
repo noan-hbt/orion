@@ -1,7 +1,7 @@
 [project]
-name = "telos"
+name = "orion"
 version = "0.0.1"
-description = "Telos: a team of persistent agents serving one person's goals."
+description = "Orion: a team of persistent agents serving one person's goals."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.scripts]
-telos = "telos.cli:main"
+orion = "orion.cli:main"
 
 [dependency-groups]
 dev = [
@@ -25,13 +25,16 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/telos"]
+packages = ["src/orion"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    "ignore::pytest.PytestConfigWarning",
+]
 timeout = 60
 
 [tool.ruff]

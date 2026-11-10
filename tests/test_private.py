@@ -10,6 +10,7 @@ import pytest
 from orion.core.private import write_private
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file permissions not supported on Windows")
 def test_a_private_file_is_never_readable_by_others(tmp_path: Path) -> None:
     old = os.umask(0)  # even with a permissive umask
     try:

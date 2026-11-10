@@ -12,6 +12,39 @@ case "${1:-}" in
     --core) who=core; shift ;;
     --guardian) who=guardian; shift ;;
     memory|doctor|chat) who=core ;;
+    backup)
+        # If a destination directory is provided (e.g. nightly timer: orion backup /srv/orion/backups/core ...)
+        if [ $# -ge 2 ] && { [ -d "$2" ] || [ "${2:-}" = "--guardian" ]; }; then
+            who=core
+            for a in "$@"; do [ "$a" = "--guardian" ] && who=guardian; done
+        else
+            shift
+            if [ "${1:-}" = "restore" ]; then
+                shift
+                exec /srv/orion/app/deploy/backup.sh restore "$@"
+            elif [ "${1:-}" = "full" ]; then
+                shift
+                exec /srv/orion/app/deploy/backup.sh backup "$@"
+            elif [ "${1:-}" = "backup" ]; then
+                shift
+                exec /srv/orion/app/deploy/backup.sh backup "$@"
+            else
+                exec /srv/orion/app/deploy/backup.sh "$@"
+            fi
+        fi
+        ;;
+    restore)
+        shift
+        exec /srv/orion/app/deploy/backup.sh restore "$@"
+        ;;
+    uninstall)
+        shift
+        exec /srv/orion/app/deploy/uninstall.sh "$@"
+        ;;
+    reset)
+        shift
+        exec /srv/orion/app/deploy/reset.sh "$@"
+        ;;
     claude)
         [ "${2:-}" = login ] || { echo "usage: sudo orion claude login"; exit 2; }
         [ -x /usr/local/bin/claude ] || /srv/orion/app/deploy/claude-code

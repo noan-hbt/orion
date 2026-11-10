@@ -1,6 +1,6 @@
 """Event model shared by the whole system.
 
-Every fact Telos holds is either an event in the journal or a projection derived from events.
+Every fact Orion holds is either an event in the journal or a projection derived from events.
 Each event carries its provenance and a trust level; anything derived from several pieces of
 content is never more trusted than its least trusted input.
 
@@ -17,14 +17,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from telos.core.ids import new_id
+from orion.core.ids import new_id
 
 KIND_PATTERN = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$"
 """A kind is dotted lowercase, at least two parts: `message.received`, `agent.created`."""
 
 
 class Trust(IntEnum):
-    """How much Telos may rely on a piece of content. Higher is more trusted."""
+    """How much Orion may rely on a piece of content. Higher is more trusted."""
 
     UNKNOWN = 0
     WEB = 10

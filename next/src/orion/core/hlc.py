@@ -4,7 +4,7 @@ A timestamp combines physical milliseconds with a logical counter: it stays clos
 and never goes backwards, even when the system clock stalls or is set back. The string form
 sorts lexicographically in timestamp order, so SQLite can order events by it directly.
 
-Only the local half of the clock is kept (no `observe` of a remote timestamp): nothing in Telos
+Only the local half of the clock is kept (no `observe` of a remote timestamp): nothing in Orion
 exchanges events between instances yet.
 """
 
@@ -43,7 +43,7 @@ def _system_ms() -> int:
 
 
 class HybridClock:
-    """Thread-safe clock for one node (one Telos instance)."""
+    """Thread-safe clock for one node (one Orion instance)."""
 
     def __init__(self, node: str, clock_ms: Callable[[], int] | None = None) -> None:
         if not node or "." in node:

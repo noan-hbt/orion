@@ -1,42 +1,57 @@
 #!/usr/bin/env bash
-# Back Orion up completely, or put such a backup back in place.
+# ==============================================================================
+#   💾  ORION — Assistant de Sauvegarde et Restauration Complète
 #
-#   sudo ./backup.sh              # asks what to do, then the rest
-#   sudo ./backup.sh backup  [--to DIR] [--encrypt passphrase|age:<public key>|none]
-#                            [--with-nightly] [--yes]
-#   sudo ./backup.sh restore [ARCHIVE] [--identity FILE] [--no-archive] [--yes]
+#   Usage interactif :
+#     sudo orion backup               # Assistant interactif (sauvegarder ou restaurer)
+#     sudo orion restore              # Assistant interactif de restauration
+#     sudo deploy/backup.sh
 #
-# A full backup holds what the nightly ones (`orion backup`, the journals only) do not: the
-# settings (config/orion.toml), the secrets (/etc/orion, the guardian's secrets.env and admin
-# token), the plan logins (ChatGPT, Claude Code), the guardian's vault, the installed modules,
-# and everything in data/: files, photos, library, workspaces, its browser and the sites signed
-# in to. The code, Python and the browsers are not data: install.sh puts them back.
-# --with-nightly adds /srv/orion/backups. Orion is stopped while the copy is made (a few
-# seconds), so every database is at rest, and the journals are checked before it counts (D81).
-#
-# It holds every secret and your whole life: it is written for root only (0600), and encrypted
-# when asked (a passphrase with age or gpg, or an age public key). Keep a copy off the server.
-#
-# Restore: on a server where install.sh has run (users, code, services). The archive is
-# decrypted, checked (nothing outside Orion's folders, journals readable) and only then Orion
-# is stopped, what is there is kept aside (/root/orion-before-restore-<date>.tar.gz, unless
-# --no-archive), and the backup takes its place. The nightly backups are added to, never
-# removed. ChatGPT's login rotates: an old copy may have to be signed in again.
+#   Commandes directes :
+#     sudo ./backup.sh backup  [--to DIR] [--encrypt passphrase|age:<clé>|none]
+#                              [--with-nightly] [--yes]
+#     sudo ./backup.sh restore [ARCHIVE] [--identity FICHIER] [--no-archive] [--yes]
+# ==============================================================================
 set -euo pipefail
 
-ROOT="${ORION_ROOT:-/srv/orion}"  # ORION_ROOT, ORION_ETC: a pretend installation, to try the
-ETC="${ORION_ETC:-/etc}"          # script out (no users, no checks of the journals)
+# Reconnecter stdin au terminal si exécuté via pipe
+if [ ! -t 0 ] && [ -e /dev/tty ]; then
+    exec < /dev/tty
+fi
+
+# Couleurs et styles
+if [ -t 1 ]; then
+    BOLD="\033[1m"
+    GREEN="\033[1;32m"
+    CYAN="\033[1;36m"
+    YELLOW="\033[1;33m"
+    RED="\033[1;31m"
+    DIM="\033[2m"
+    RESET="\033[0m"
+else
+    BOLD=""
+    GREEN=""
+    CYAN=""
+    YELLOW=""
+    RED=""
+    DIM=""
+    RESET=""
+fi
+
+ROOT="${ORION_ROOT:-/srv/orion}"  # ORION_ROOT, ORION_ETC : installation de test
+ETC="${ORION_ETC:-/etc}"
 DIR="${ORION_ARCHIVE_DIR:-/root}"
 ORION="$ROOT/app/.venv/bin/orion"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 INFO=orion-backup.txt
-# Timers first: nothing must start again behind our back.
-UNITS=(orion-update.timer orion-backup-core.timer orion-backup-guardian.timer orion-core
-    orion-guardian)
+
+# Ordre d'arrêt : timers d'abord pour éviter tout redémarrage intempestif
+UNITS=(orion-update.timer orion-backup-core.timer orion-backup-guardian.timer orion-core orion-guardian)
 
 ACTION="" ARCHIVE="" TO="" ENCRYPT="" NIGHTLY=0 IDENTITY="" KEEP_CURRENT=1 YES=0
 usage="backup [--to DIR] [--encrypt passphrase|age:<key>|none] [--with-nightly] [--yes]
        restore [ARCHIVE] [--identity FILE] [--no-archive] [--yes]"
+
 while [ $# -gt 0 ]; do
     case "$1" in
         backup | restore)
@@ -63,13 +78,23 @@ asks() { [ "$YES" != 1 ] && [ -t 0 ]; }
 for path in "$ROOT" "$ETC" "$DIR"; do
     case "$path" in /*) ;; *) die "$path: give an absolute path" ;; esac
 done
+
 TESTING=0
 [ -z "${ORION_ROOT:-}" ] || TESTING=1
 
 if [ -z "$ACTION" ]; then
     asks || die "say what to do: $usage"
-    echo "1) back Orion up completely"
-    echo "2) restore a full backup"
+    if [ -t 0 ]; then
+        echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${RESET}"
+        echo -e "${BOLD}       💾  ORION — ASSISTANT DE SAUVEGARDE ET DE RESTAURATION${RESET}"
+        echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${RESET}\n"
+        echo -e "Que souhaitez-vous faire ?"
+        echo -e "  ${BOLD}1)${RESET} Sauvegarder complètement Orion ${DIM}(souvenirs, réglages, mots de passe)${RESET}"
+        echo -e "  ${BOLD}2)${RESET} Restaurer une sauvegarde précédente\n"
+    else
+        echo "1) back Orion up completely"
+        echo "2) restore a full backup"
+    fi
     read -r -p "Choice [1]: " choice
     case "${choice:-1}" in
         1) ACTION=backup ;;
@@ -78,7 +103,7 @@ if [ -z "$ACTION" ]; then
     esac
 fi
 
-# --- stopping and starting Orion --------------------------------------------------------------
+# --- Arrêt et redémarrage propre d'Orion --------------------------------------
 
 was_on=()
 stop_orion() {
@@ -90,12 +115,11 @@ stop_orion() {
     systemctl stop "${UNITS[@]}"
 }
 
-start_again() {  # what was on, the guardian before the core, the timers last
+start_again() {  # Redémarre ce qui tournait (le gardien avant le cœur, les timers en dernier)
     local unit
     [ "${#was_on[@]}" -gt 0 ] || return 0
     echo "==> starting Orion again"
-    for unit in orion-guardian orion-core orion-update.timer orion-backup-core.timer \
-        orion-backup-guardian.timer; do
+    for unit in orion-guardian orion-core orion-update.timer orion-backup-core.timer orion-backup-guardian.timer; do
         if printf '%s\n' "${was_on[@]}" | grep -qxF "$unit"; then systemctl start "$unit"; fi
     done
     was_on=()
@@ -117,9 +141,9 @@ trap finish EXIT
 
 private_tmp() { TMP="$(umask 077 && mktemp -d "$1/.orion-backup.XXXXXX")"; }
 
-# --- what a full backup holds -----------------------------------------------------------------
+# --- Ce qu'une sauvegarde complète contient -----------------------------------
 
-items() {  # as paths relative to /, like tar keeps them
+items() {  # Chemins relatifs à /
     local path
     for path in "$ROOT/config" "$ROOT/data" "$ROOT/guardian" "$ETC/orion"; do
         [ ! -e "$path" ] || echo "${path#/}"
@@ -128,8 +152,6 @@ items() {  # as paths relative to /, like tar keeps them
     return 0
 }
 
-# Check a journal (or the guardian's ledger) the way a restore would read it. On a copy, so
-# nothing SQLite writes beside it (-wal, -shm) ends up owned by root next to the real one.
 CHECKS=""
 check_journal() {
     local file="$1" copy said
@@ -149,7 +171,7 @@ check_journal() {
     CHECKS+="  $(basename "$file"): ${said##* : }"$'\n'
 }
 
-make_archive() {  # make_archive <file> <path relative to />...
+make_archive() {
     local out="$1" commit=""
     shift
     [ ! -d "$ROOT/app/.git" ] || commit="$(git -C "$ROOT/app" rev-parse --short HEAD 2>/dev/null || true)"
@@ -163,10 +185,10 @@ make_archive() {  # make_archive <file> <path relative to />...
         printf '%s' "$CHECKS"
     } > "$TMP/$INFO"
     (umask 077 && tar -czf "$out" -C "$TMP" "$INFO" -C / "$@")
-    tar -tzf "$out" > /dev/null  # readable to the end, or it does not count
+    tar -tzf "$out" > /dev/null  # Lisible jusqu'au bout, sinon elle ne compte pas
 }
 
-# --- backup -----------------------------------------------------------------------------------
+# --- Action de sauvegarde -----------------------------------------------------
 
 do_backup() {
     [ -d "$ROOT/data" ] || die "Orion is not installed here ($ROOT/data is missing)."
@@ -228,7 +250,7 @@ do_backup() {
     check_journal "$ROOT/guardian/guardian.sqlite3"
     echo "==> copying"
     make_archive "$TMP/plain.tar.gz" "${what[@]}"
-    start_again  # before encrypting: Orion is down only for the copy
+    start_again  # Orion redémarre avant le chiffrement : coupure minime
 
     case "$tool" in
         "") mv "$TMP/plain.tar.gz" "$out" ;;
@@ -244,18 +266,20 @@ do_backup() {
     echo "Done: $out ($(du -h "$out" | cut -f 1))"
     printf '%s' "$CHECKS"
     echo "Keep a copy off the server, e.g. rclone copy $out ovh:orion-backups"
-    echo "Restore: sudo $ROOT/app/deploy/backup.sh restore $(basename "$out")"
+    echo "Restore: sudo orion restore $(basename "$out")"
 }
 
-# --- restore ----------------------------------------------------------------------------------
+# --- Action de restauration ---------------------------------------------------
 
 choose_archive() {
     local found=() i
-    mapfile -t found < <(ls -1t "$DIR"/orion-full-*.tar.gz* "$DIR"/orion-before-restore-*.tar.gz \
-        2> /dev/null || true)
+    mapfile -t found < <(ls -1t "$DIR"/orion-full-*.tar.gz* "$DIR"/orion-before-restore-*.tar.gz 2> /dev/null || true)
     [ "${#found[@]}" -gt 0 ] || die "no full backup in $DIR: give its path"
+    if [ -t 0 ]; then
+        echo -e "\n${CYAN}Archives disponibles dans $DIR :${RESET}"
+    fi
     for i in "${!found[@]}"; do
-        echo "  $((i + 1))) $(basename "${found[$i]}")  ($(du -h "${found[$i]}" | cut -f 1))"
+        echo "  $((i + 1))) $(basename "${found[$i]}")  ($(du -h "${found[$i]}" 2>/dev/null | cut -f 1))"
     done
     read -r -p "Which one [1]: " choice
     choice="${choice:-1}"
@@ -264,8 +288,6 @@ choose_archive() {
     ARCHIVE="${found[$((choice - 1))]}"
 }
 
-# The first name in a listing outside Orion's folders, or climbing out of them: the archive is
-# unpacked as root.
 outside() {
     awk -v r="${ROOT#/}" -v e="${ETC#/}" -v i="$INFO" '
         function under(p) { return $0 == p || $0 == p "/" || index($0, p "/") == 1 }
@@ -361,7 +383,7 @@ do_restore() {
         mkdir -p "$(dirname "$path")"
         mv "$TMP/new$path" "$path"
     done
-    if [ -d "$TMP/new$ROOT/backups" ]; then  # added to the nightly ones, none removed
+    if [ -d "$TMP/new$ROOT/backups" ]; then  # Ajouté aux sauvegardes de la nuit, aucune supprimée
         mkdir -p "$ROOT/backups"
         cp -a "$TMP/new$ROOT/backups/." "$ROOT/backups/"
     fi
@@ -372,7 +394,7 @@ do_restore() {
     echo "Orion is back as it was in $(basename "$ARCHIVE")."
     echo "Check: sudo orion doctor"
     echo "If ChatGPT no longer answers, sign in again from the app: its login rotates."
-    [ -z "$BEFORE" ] || echo "Undo: sudo $SELF restore $BEFORE"
+    [ -z "$BEFORE" ] || echo "Undo: sudo orion restore $BEFORE"
 }
 
 case "$ACTION" in

@@ -1,4 +1,4 @@
-"""`telos serve` (R1.4): starts, journals its lifecycle, stops cleanly on SIGTERM."""
+"""`orion serve` (R1.4): starts, journals its lifecycle, stops cleanly on SIGTERM."""
 
 from __future__ import annotations
 
@@ -10,15 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from telos.core.events import Event
-from telos.core.supervisor import RestartPolicy
-from telos.host.serve import STARTED_KIND, STOPPED_KIND, open_journal, serve
+from orion.core.events import Event
+from orion.core.supervisor import RestartPolicy
+from orion.host.serve import STARTED_KIND, STOPPED_KIND, open_journal, serve
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="no SIGTERM to send on Windows")
 def test_serve_starts_and_stops_on_sigterm(tmp_path: Path) -> None:
     process = subprocess.Popen(
-        ["telos", "serve", "--data-dir", str(tmp_path / "data")],
+        ["orion", "serve", "--data-dir", str(tmp_path / "data")],
         stderr=subprocess.PIPE,
         text=True,
     )

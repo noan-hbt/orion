@@ -6848,7 +6848,7 @@ session neuve (après `/clear`) reprenne sans rien perdre.
 
 ## D294 — La v2 s'appelle Telos
 
-*09/11/2026 · acceptée · complète D291*
+*09/11/2026 · acceptée · complète D291 · annulée par D297*
 
 *Telos* (τέλος), en grec, est la fin au sens du but : ce en vue de quoi une chose existe. Chez
 Aristote, c'est la cause finale (le telos du gland est le chêne) ; *teleios* veut dire
@@ -6869,7 +6869,7 @@ choses à moitié faites (`05-refonte.md`).
 *09/11/2026 · acceptée · cadre R10.4*
 
 Pour l'instant, les instances hébergées utilisent les fournisseurs de modèles du propriétaire
-de Telos ; l'utilisateur n'apporte pas sa clé. Chaque instance a donc un plafond de dépense,
+d'Orion ; l'utilisateur n'apporte pas sa clé. Chaque instance a donc un plafond de dépense,
 réglé par le propriétaire, et s'arrête net quand il est atteint (R4.7). La facturation aux
 utilisateurs viendra plus tard, par une nouvelle décision.
 
@@ -6889,3 +6889,12 @@ que la première version écartait « pour l'instant » sont repris dans la v2 :
   accordé par agent et plafonné. Virements entre comptes et ordres de bourse restent interdits,
   même avec accord. Le paiement est un effet externe comme un autre : outbox, gardien, et
   `UNCERTAIN` s'il a peut-être eu lieu (R9.9, sur la base de D265).
+
+
+## D297 — La v2 conserve le nom Orion
+
+*10/11/2026 · acceptée · annule D294*
+
+Le nom de code Telos est abandonné : le produit conserve le nom d'Orion pour la v2.
+Le paquet dans `next/` et la commande associée s'appellent `orion`.
+

@@ -22,7 +22,7 @@ type Upcaster = Callable[[Payload], Payload]
 
 
 class NewerEventError(ValueError):
-    """An event written by a newer Telos than this one."""
+    """An event written by a newer Orion than this one."""
 
 
 @dataclass
@@ -46,8 +46,8 @@ class EventVersions:
         steps = self.upcasters.get(kind, [])
         if version > len(steps) + 1:
             raise NewerEventError(
-                f"event of kind {kind!r} is version {version}, newer than this Telos knows "
-                f"({len(steps) + 1}): run the newer Telos, or restore the journal from a backup"
+                f"event of kind {kind!r} is version {version}, newer than this Orion knows "
+                f"({len(steps) + 1}): run the newer Orion, or restore the journal from a backup"
             )
         for step in steps[version - 1 :]:
             payload = step(dict(payload))
@@ -55,4 +55,4 @@ class EventVersions:
 
 
 VERSIONS = EventVersions()
-"""The versions of every event kind Telos writes. Modules add their upcasters here."""
+"""The versions of every event kind Orion writes. Modules add their upcasters here."""

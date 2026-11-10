@@ -69,4 +69,5 @@ ignore = ["TRY003"]
 include = ["src", "tests", "evals"]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
+pythonPlatform = "Linux"
 reportPrivateUsage = "none"

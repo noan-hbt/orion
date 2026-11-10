@@ -1,4 +1,4 @@
-"""The journal: Telos's append-only source of truth.
+"""The journal: Orion's append-only source of truth.
 
 Events are never updated nor deleted, and the database itself refuses it (triggers). The only
 mutation is redaction, used to honour "forget this": the payload is erased, the row stays (so
@@ -6,7 +6,7 @@ sequence numbers and causal links remain intact), and a `journal.redacted` event
 was erased and why.
 
 Each event is stored with the version of its kind when it was written; reads bring it to
-today's shape (`telos.core.upcast`), so changing a payload never means rewriting history.
+today's shape (`orion.core.upcast`), so changing a payload never means rewriting history.
 
 SQLite runs in WAL mode with a single writer. All blocking calls go through a dedicated worker
 thread so the asyncio loop never blocks on disk.
@@ -21,10 +21,10 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import cast
 
-from telos.core.events import Event, NewEvent, Provenance, Trust
-from telos.core.hlc import HybridClock
-from telos.core.sqlite import SqliteWorker
-from telos.core.upcast import VERSIONS, EventVersions
+from orion.core.events import Event, NewEvent, Provenance, Trust
+from orion.core.hlc import HybridClock
+from orion.core.sqlite import SqliteWorker
+from orion.core.upcast import VERSIONS, EventVersions
 
 REDACTED_KIND = "journal.redacted"
 

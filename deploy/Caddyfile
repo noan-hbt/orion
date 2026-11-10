@@ -33,6 +33,9 @@
 	}
 	# Orion's own app (D125): nothing works without a passkey paired with your phone. The
 	# conversation goes to the core; the app itself, its passkeys and approvals to the guardian.
+	handle /app {
+		redir /app/ permanent
+	}
 	handle /app/api/* {
 		reverse_proxy 127.0.0.1:8796
 	}
@@ -40,6 +43,9 @@
 		reverse_proxy 127.0.0.1:8795
 	}
 	# The control page: reachable only with a one-time link Orion sends you.
+	handle /console {
+		redir /console/ permanent
+	}
 	handle /console/* {
 		reverse_proxy 127.0.0.1:8790
 	}

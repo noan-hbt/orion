@@ -1,4 +1,4 @@
-"""Files only Telos's user may read (keys, logins, cookies, the owner's files): created 0600,
+"""Files only Orion's user may read (keys, logins, cookies, the owner's files): created 0600,
 never readable by anyone else, not even for the moment between writing and `chmod`."""
 
 from __future__ import annotations
